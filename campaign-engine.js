@@ -16,7 +16,7 @@ async function createCampaign(client, input) {
   const campaign = inserted.rows[0];
   await applyLedgerEntry(client, { userId: ownerId, amount: (-cost).toString(), reason: "campaign_funding", referenceId: campaign.id, idempotencyKey: "campaign:" + campaign.id + ":funding" });
   await recordCampaignEvent(client, campaign.id, ownerId, "created", { slots: Number(slots), reward_per_member: Number(rewardPerMember), cost: cost.toString() });
-  await enqueueOutbox(client, "campaign.created", { campaignId: campaign.id, ownerId: String(ownerId) });
+  await enqueueOutbox(client, "campaign.created", { campaignId: campaign.id, ownerId: String(ownerId), status: campaign.status });
   return campaign;
 }
 

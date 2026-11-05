@@ -4,7 +4,7 @@ const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
 const { migrateV4 } = require("./platform-v4");
 const { createCampaign, cancelCampaign, changeCampaignStatus } = require("./campaign-engine");
-const { applyLedgerEntry, recordCampaignEvent } = require("./platform-v4");
+const { applyLedgerEntry, recordCampaignEvent, hasPermission, grantStaffRole } = require("./platform-v4");
 const { startPlatformWorkers } = require("./platform-workers");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -48,8 +48,23 @@ async function pointsPerMember() {
 const isAdmin = (ctx) => !!ctx.from && String(ctx.from.id) === adminId;
 async function requireAdmin(ctx) {
   if (isAdmin(ctx)) return true;
-  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(()=>{});
-  return false;
+  const action=ctx.callbackQuery?.data||"";
+  let permission="users.read";
+  if(action==="adm:stats")permission="analytics.read";
+  else if(action==="adm:points"||action==="adm:point_check")permission="wallet.read";
+  else if(action==="adm:point_add"||action==="adm:point_sub")permission="wallet.adjust";
+  else if(action==="adm:users"||action==="adm:user_manage")permission="users.read";
+  else if(/^adm:(ban|unban):/.test(action))permission="users.manage";
+  else if(action==="adm:campaigns"||/^adm:campaign:\\d+$/.test(action))permission="campaigns.read";
+  else if(/^adm:(cancel_campaign|campaign_pause|campaign_resume):/.test(action))permission="campaigns.manage";
+  else if(action==="adm:stats")permission="analytics.read";
+  else if(action==="adm:settings"||action==="adm:rate"||action==="adm:maintenance"||action==="adm:retention"||action==="adm:retention_hours")permission="settings.manage";
+  else if(action==="adm:broadcast")permission="broadcast.send";
+  else if(action==="adm:staff")permission="staff.manage";
+  else if(action==="adm:home")permission="users.read";
+  const allowed=await hasPermission(pool,ctx.from.id,permission,adminId);
+  if(!allowed&&ctx.callbackQuery)await ctx.answerCbQuery("ليس لديك صلاحية لهذه العملية.",{show_alert:true}).catch(()=>{});
+  return allowed;
 }
 async function registerUser(ctx) {
   const u = ctx.from;
@@ -62,14 +77,16 @@ async function isChannelAdmin(channel,userId) {
   const m = await bot.telegram.getChatMember(channel,userId);
   return m.status === "administrator" || m.status === "creator";
 }
-function mainKeyboard() {
-  return Markup.inlineKeyboard([
+function mainKeyboard(isStaff=false) {
+  const rows=[
     [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
     [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
     [Markup.button.callback("📡 قنواتي","owner:channels"),Markup.button.callback("🔖 المفضلة","my:favorites")],
     [Markup.button.callback("💎 مركز المكافآت","v3:menu")],
     [Markup.button.callback("ℹ️ حول SubRocket","help")]
-  ]);
+  ];
+  if(isStaff)rows.push([Markup.button.callback("🛡️ لوحة الفريق","adm:home")]);
+  return Markup.inlineKeyboard(rows);
 }
 function adminKeyboard() {
   return Markup.inlineKeyboard([
@@ -134,7 +151,8 @@ bot.start(async ctx=>{
   const user=await pool.query("SELECT is_banned FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);
   if(user.rows[0]?.is_banned) return;
   if ((await setting("maintenance_mode","false"))==="true" && !isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
-  await ctx.reply("أهلاً بيك في SubRocket 🚀\nمنصة النقاط والحملات للقنوات. استخدم الأزرار أدناه للتحكم بكل شيء.",mainKeyboard());
+  const staff=await pool.query("SELECT role FROM staff_members WHERE user_id=$1",[String(ctx.from.id)]);
+  await ctx.reply("أهلاً بيك في SubRocket 🚀\nمنصة النقاط والحملات للقنوات. استخدم الأزرار أدناه للتحكم بكل شيء.",mainKeyboard(staff.rowCount>0));
 });
 bot.command("adminadmin",async ctx=>{ if(!isAdmin(ctx)) return; await showAdmin(ctx); });
 bot.command("help",async ctx=>{
@@ -307,7 +325,19 @@ bot.action(/^adm:/,async ctx=>{
   await ctx.answerCbQuery().catch(()=>{});
   const action=ctx.callbackQuery.data;
   try {
-    if(action==="adm:home") return showAdmin(ctx,true);
+    if(action==="adm:home") {
+      if(isAdmin(ctx))return showAdmin(ctx,true);
+      const staff=await pool.query("SELECT role FROM staff_members WHERE user_id=$1",[String(ctx.from.id)]);
+      const role=staff.rows[0]?.role;
+      const rows=[];
+      if(role==="admin")return showAdmin(ctx,true);
+      if(role==="moderator")rows.push([Markup.button.callback("🚀 إدارة الحملات","adm:campaigns"),Markup.button.callback("👥 المستخدمون","adm:users")]);
+      if(role==="support")rows.push([Markup.button.callback("🎧 تذاكر الدعم","v3:admin_tickets")]);
+      if(role==="analyst")rows.push([Markup.button.callback("📊 التحليلات","adm:stats")]);
+      rows.push([Markup.button.callback("⬅️ الرئيسية","home")]);
+      return ctx.reply("🛡️ لوحة الفريق\nالدور: "+(role||"غير معروف")+"\nاختر الأداة المسموح بها حسب صلاحياتك.",Markup.inlineKeyboard(rows));
+    }
+    if(action==="adm:staff") {adminState.set(String(ctx.from.id),{type:"staff_grant"});return ctx.reply("أرسل أيدي المستخدم والدور بهذا الشكل:\n123456789 support\nالأدوار: admin / moderator / support / analyst");}
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
     if(action==="adm:users") return showAdminUsers(ctx);
@@ -364,7 +394,7 @@ bot.action(/^adm:/,async ctx=>{
 
 bot.on("text",async ctx=>{
   if (await bot.handleText?.(ctx)) return;
-  if(!isAdmin(ctx)) {
+  if(!isAdmin(ctx) && !adminState.has(String(ctx.from.id))) {
     const state=userState.get(String(ctx.from.id));
     if(!state) return;
     const input=(ctx.message.text||"").trim();
@@ -406,10 +436,11 @@ bot.on("text",async ctx=>{
     }
     return;
   }
-  const state=adminState.get(adminId);
+  const actorId=String(ctx.from.id);
+  const state=adminState.get(actorId)||adminState.get(adminId);
   if(!state) return;
   const input=(ctx.message.text||"").trim();
-  if(input==="إلغاء"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
+  if(input==="إلغاء"){adminState.delete(actorId);adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
   try {
     if(state.type==="user_manage") {
       if(!/^\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");
@@ -423,6 +454,14 @@ bot.on("text",async ctx=>{
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
       await setSetting("points_per_member",input);adminState.delete(adminId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");
+    }
+    if(state.type==="staff_grant") {
+      const parts=input.split(/\\s+/);
+      if(!/^\\d+$/.test(parts[0]||"")||parts.length!==2||!["admin","moderator","support","analyst"].includes(parts[1]))return ctx.reply("الصيغة غير صحيحة. مثال: 123456789 support");
+      await grantStaffRole(pool,ctx.from.id,parts[0],parts[1],adminId);
+      adminState.delete(actorId);
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'staff_role_grant',$2,$3::jsonb)",[actorId,parts[0],JSON.stringify({role:parts[1]})]);
+      return ctx.reply("تم منح الدور "+parts[1]+" للمستخدم "+parts[0]+".");
     }
     if(state.type==="retention_hours") {
       if(!/^\d+$/.test(input)||Number(input)<6||Number(input)>168) return ctx.reply("مدة التحقق يجب أن تكون بين 6 و168 ساعة.");

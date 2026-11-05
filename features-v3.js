@@ -94,10 +94,19 @@ async function notifications(ctx,pool) {
   await pool.query("UPDATE notifications SET read_at=NOW() WHERE user_id=$1 AND read_at IS NULL",[String(ctx.from.id)]);
   await ctx.reply("🔔 مركز الإشعارات\n\n"+(r.rows.map(x=>"• "+x.title+"\n"+x.body).join("\n\n")||"لا توجد إشعارات."),menu());
 }
-async function handleText(ctx,pool,adminId) {
+async function handleText(ctx,pool,adminId,bot) {
   const id=String(ctx.from.id),input=(ctx.message.text||"").trim();
   if(id===String(adminId)&&adminStates.has(id)){
     if(input==="إلغاء"){adminStates.delete(id);await ctx.reply("تم الإلغاء.");return true;}
+    if(state.type==="support_reply"){
+      if(input.length>3000){await ctx.reply("الحد الأقصى 3000 حرف.");return true;}
+      const r=await pool.query("UPDATE support_tickets SET admin_reply=$1,status='answered',updated_at=NOW() WHERE id=$2 RETURNING user_id",[input,state.ticketId]);
+      if(!r.rowCount){adminStates.delete(id);await ctx.reply("التذكرة غير موجودة.");return true;}
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_reply',$2,$3::jsonb)",[id,state.ticketId,JSON.stringify({reply_length:input.length})]);
+      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"رد على تذكرتك #"+state.ticketId,input]);
+      await bot.telegram.sendMessage(String(r.rows[0].user_id),"🎧 رد فريق الدعم على تذكرتك #"+state.ticketId+":\n\n"+input).catch(()=>{});
+      adminStates.delete(id);await ctx.reply("تم إرسال الرد للمستخدم.");return true;
+    }
     const p=input.split(/\s+/);
     if(p.length!==3||!/^[A-Z0-9_-]{4,32}$/i.test(p[0])||!/^\d+$/.test(p[1])||!/^\d+$/.test(p[2])||Number(p[1])<1||Number(p[2])<1||Number(p[2])>100000){await ctx.reply("الصيغة: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50");return true;}
     await pool.query("INSERT INTO reward_coupons(code,points,max_uses,created_by) VALUES($1,$2,$3,$4)",[p[0].toUpperCase(),p[1],Number(p[2]),id]);
@@ -144,7 +153,42 @@ function installV3(bot,pool,adminId){
   });
   bot.action("v3:coupon",async c=>{await c.answerCbQuery();userStates.set(String(c.from.id),"coupon");await c.reply("🎁 أرسل كود المكافأة أو اكتب إلغاء.");});
   bot.action("v3:support",async c=>{await c.answerCbQuery();userStates.set(String(c.from.id),"support");await c.reply("🎧 اكتب استفسارك أو شكواك (5–3000 حرف). للإلغاء اكتب إلغاء.");});
+
+  bot.action("v3:admin_tickets",async c=>{
+    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    await c.answerCbQuery();
+    const r=await pool.query("SELECT id,user_id,message,status,created_at FROM support_tickets WHERE status<>'closed' ORDER BY created_at ASC LIMIT 20");
+    if(!r.rowCount){await c.reply("🎧 لا توجد تذاكر مفتوحة حالياً.",Markup.inlineKeyboard([[Markup.button.callback("⬅️ لوحة المدير","adm:home")]]));return;}
+    const rows=r.rows.map(t=>[Markup.button.callback("#"+t.id+" · "+t.status+" · "+String(t.message).slice(0,24),"v3:ticket:"+t.id)]);
+    rows.push([Markup.button.callback("⬅️ لوحة المدير","adm:home")]);
+    await c.reply("🎧 تذاكر الدعم المفتوحة ("+r.rowCount+")",Markup.inlineKeyboard(rows));
+  });
+  bot.action(/^v3:ticket:(\d+)$/,async c=>{
+    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    await c.answerCbQuery();
+    const r=await pool.query("SELECT * FROM support_tickets WHERE id=$1",[c.match[1]]);
+    if(!r.rowCount){await c.reply("التذكرة غير موجودة.");return;}
+    const t=r.rows[0];
+    await c.reply("🎧 التذكرة #"+t.id+"\nالمستخدم: "+t.user_id+"\nالحالة: "+t.status+"\nالتاريخ: "+new Date(t.created_at).toLocaleString("ar-IQ")+"\n\nالرسالة:\n"+t.message+(t.admin_reply?"\n\nآخر رد:\n"+t.admin_reply:""),Markup.inlineKeyboard([
+      [Markup.button.callback("✉️ الرد على التذكرة","v3:ticket_reply:"+t.id)],
+      [Markup.button.callback("🔒 إغلاق التذكرة","v3:ticket_close:"+t.id)],
+      [Markup.button.callback("⬅️ قائمة التذاكر","v3:admin_tickets")]
+    ]));
+  });
+  bot.action(/^v3:ticket_reply:(\d+)$/,async c=>{
+    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    await c.answerCbQuery();adminStates.set(String(adminId),{type:"support_reply",ticketId:Number(c.match[1])});
+    await c.reply("أرسل ردك على التذكرة #"+c.match[1]+". للإلغاء أرسل إلغاء.");
+  });
+  bot.action(/^v3:ticket_close:(\d+)$/,async c=>{
+    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    await c.answerCbQuery();
+    const r=await pool.query("UPDATE support_tickets SET status='closed',updated_at=NOW() WHERE id=$1 RETURNING user_id",[c.match[1]]);
+    if(r.rowCount){await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id) VALUES($1,'support_close',$2)",[adminId,Number(c.match[1])]);await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"تم إغلاق تذكرتك #"+c.match[1],"تم إغلاق طلب الدعم الخاص بك."]);}
+    await c.reply(r.rowCount?"🔒 تم إغلاق التذكرة.":"التذكرة غير موجودة.");
+  });
+
   bot.action("v3:admin_coupon",async c=>{if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}await c.answerCbQuery();adminStates.set(String(adminId),"coupon");await c.reply("أرسل: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50\nللإلغاء: إلغاء");});
-  bot.handleText=c=>handleText(c,pool,adminId);
+  bot.handleText=c=>handleText(c,pool,adminId,bot);
 }
 module.exports={migrateV3,installV3,applyReferralOnStart,rewardReferral,menu};

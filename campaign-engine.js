@@ -2,7 +2,7 @@
 const { applyLedgerEntry, enqueueOutbox, recordCampaignEvent } = require("./platform-v4");
 
 async function createCampaign(client, input) {
-  const { ownerId, channelUsername, channelTitle, slots, rewardPerMember, category = "عام", description = null, imageUrl = null, expiresAt = null } = input;
+  const { ownerId, channelUsername, channelTitle, slots, rewardPerMember, category = "عام", description = null, imageUrl = null, expiresAt = null, initialStatus = "active" } = input;
   if (!Number.isInteger(Number(slots)) || Number(slots) < 1 || Number(slots) > 10000) throw new Error("Invalid campaign slots");
   if (!Number.isInteger(Number(rewardPerMember)) || Number(rewardPerMember) < 1) throw new Error("Invalid campaign reward");
   const cost = BigInt(slots) * BigInt(rewardPerMember);
@@ -10,8 +10,8 @@ async function createCampaign(client, input) {
   if (!owner.rowCount || owner.rows[0].is_banned) throw new Error("Campaign owner is unavailable");
   if (BigInt(owner.rows[0].points) < cost) throw new Error("Insufficient points to fund campaign");
   const inserted = await client.query(
-    "INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member,category,description,image_url,expires_at,status) VALUES($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,'active') RETURNING *",
-    [String(ownerId), channelUsername, channelTitle || channelUsername, Number(slots), Number(rewardPerMember), category, description, imageUrl, expiresAt]
+    "INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member,category,description,image_url,expires_at,status) VALUES($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+    [String(ownerId), channelUsername, channelTitle || channelUsername, Number(slots), Number(rewardPerMember), category, description, imageUrl, expiresAt, initialStatus]
   );
   const campaign = inserted.rows[0];
   await applyLedgerEntry(client, { userId: ownerId, amount: (-cost).toString(), reason: "campaign_funding", referenceId: campaign.id, idempotencyKey: "campaign:" + campaign.id + ":funding" });
@@ -57,6 +57,22 @@ async function changeCampaignStatus(client, campaignId, actorId, action) {
   return { changed: true, status: transition.to };
 }
 
+async function reviewCampaign(client, campaignId, adminId, approved, reason = null) {
+  const found = await client.query("SELECT * FROM campaigns WHERE id=$1 FOR UPDATE", [Number(campaignId)]);
+  if (!found.rowCount || found.rows[0].status !== "pending_review") return { reviewed: false, reason: "not_pending_review" };
+  const campaign = found.rows[0];
+  if (approved) {
+    await client.query("UPDATE campaigns SET status='active',reviewed_by=$1,reviewed_at=NOW(),rejection_reason=NULL,updated_at=NOW() WHERE id=$2", [String(adminId), campaign.id]);
+    await recordCampaignEvent(client, campaign.id, adminId, "approved", {});
+    await enqueueOutbox(client, "campaign.approved", { campaignId: campaign.id, ownerId: String(campaign.owner_id) });
+    return { reviewed: true, approved: true };
+  }
+  const result = await cancelCampaign(client, campaign.id, adminId, reason || "rejected_by_review");
+  await client.query("UPDATE campaigns SET reviewed_by=$1,reviewed_at=NOW(),rejection_reason=$2 WHERE id=$3", [String(adminId), reason || "rejected_by_review", campaign.id]);
+  await recordCampaignEvent(client, campaign.id, adminId, "rejected", { reason: reason || "rejected_by_review", refund: result.refund || "0" });
+  return { reviewed: true, approved: false, refund: result.refund || "0", ownerId: String(campaign.owner_id) };
+}
+
 async function updateCampaignDetails(client, campaignId, ownerId, patch) {
   const allowed = ["description", "image_url", "category", "expires_at"];
   const keys = Object.keys(patch).filter(key => allowed.includes(key));
@@ -75,4 +91,4 @@ async function updateCampaignDetails(client, campaignId, ownerId, patch) {
   return true;
 }
 
-module.exports = { createCampaign, cancelCampaign, changeCampaignStatus, updateCampaignDetails };
+module.exports = { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign, updateCampaignDetails };

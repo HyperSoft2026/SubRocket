@@ -205,7 +205,8 @@ bot.action(/^adm:/,async ctx=>{
     if(action==="adm:home") return showAdmin(ctx,true);
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
-    if(action==="adm:users") return showAdminUsers(ctx);\n    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل /cancel للإلغاء.");}
+    if(action==="adm:users") return showAdminUsers(ctx);
+    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل /cancel للإلغاء.");}
     if(action==="adm:settings") return showAdminSettings(ctx);
     if(action==="adm:campaigns") return showAdminCampaigns(ctx);
     if(action==="adm:point_add"||action==="adm:point_sub"||action==="adm:point_check") {

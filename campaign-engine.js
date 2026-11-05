@@ -24,8 +24,9 @@ async function cancelCampaign(client, campaignId, actorId, reason = "cancelled")
   const found = await client.query("SELECT * FROM campaigns WHERE id=$1 FOR UPDATE", [Number(campaignId)]);
   if (!found.rowCount) return { cancelled: false, reason: "not_found" };
   const campaign = found.rows[0];
-  if (["cancelled", "expired", "completed"].includes(campaign.status)) return { cancelled: false, reason: "not_active" };
+  if (["cancelled", "expired"].includes(campaign.status)) return { cancelled: false, reason: "not_active" };
   const pending = await client.query("SELECT COUNT(*)::int count FROM campaign_claims WHERE campaign_id=$1 AND verification_status='pending'",[campaign.id]);
+  if (campaign.status === "completed" && Number(pending.rows[0].count) === 0) return { cancelled: false, reason: "not_active" };
   const refundableSlots=BigInt(campaign.slots_remaining)+BigInt(pending.rows[0].count);
   const refund = refundableSlots * BigInt(campaign.reward_per_member);
   await client.query("UPDATE campaign_claims SET verification_status='rejected',reward_paid=FALSE WHERE campaign_id=$1 AND verification_status='pending'",[campaign.id]);

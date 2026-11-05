@@ -309,7 +309,7 @@ bot.action(/^owner:use:(\d+)$/,async ctx=>{
   await ctx.answerCbQuery();
   const r=await pool.query("SELECT username,title FROM channel_owners WHERE id=$1 AND owner_id=$2 AND verified=TRUE",[ctx.match[1],String(ctx.from.id)]);
   if(!r.rowCount)return ctx.reply("القناة غير موجودة أو لم تعد موثقة.");
-  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:r.rows[0].username});
+  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:"@"+r.rows[0].username});
   await ctx.reply("تم اختيار قناة "+r.rows[0].title+". كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
 });
 bot.action(/^owner:use-latest:(-?\d+)$/,async ctx=>{

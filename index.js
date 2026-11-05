@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
 const { Pool } = require("pg");
+const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminId = String(process.env.TELEGRAM_ADMIN_ID || "");
@@ -61,6 +62,7 @@ function mainKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
     [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
+    [Markup.button.callback("💎 مركز المكافآت","v3:menu")],
     [Markup.button.callback("ℹ️ حول SubRocket","help")]
   ]);
 }
@@ -69,6 +71,7 @@ function adminKeyboard() {
     [Markup.button.callback("📊 الإحصائيات","adm:stats"),Markup.button.callback("⭐ إدارة النقاط","adm:points")],
     [Markup.button.callback("👥 المستخدمون","adm:users"),Markup.button.callback("📢 إذاعة رسالة","adm:broadcast")],
     [Markup.button.callback("🚀 الحملات","adm:campaigns"),Markup.button.callback("⚙️ إعدادات البوت","adm:settings")],
+    [Markup.button.callback("🎟️ إنشاء كود مكافأة","v3:admin_coupon")],
     [Markup.button.callback("🔄 تحديث اللوحة","adm:home")]
   ]);
 }
@@ -117,6 +120,7 @@ async function showAdminCampaigns(ctx) {
 }
 bot.start(async ctx=>{
   await registerUser(ctx);
+  if (ctx.startPayload) await applyReferralOnStart(pool,ctx.from.id,ctx.startPayload).catch(e=>console.error("Referral registration failed:",e.message));
   const user=await pool.query("SELECT is_banned FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);
   if(user.rows[0]?.is_banned) return;
   if ((await setting("maintenance_mode","false"))==="true" && !isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
@@ -148,6 +152,7 @@ bot.action(/^claim:(\d+)$/,async ctx=>{
     await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[reward,String(ctx.from.id)]);
     await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_reward',$3)",[String(ctx.from.id),reward,id]);
     await client.query("UPDATE campaigns SET slots_remaining=$1,status=$2 WHERE id=$3",[left,left===0?"completed":"active",id]);
+    await rewardReferral(client,pool,ctx.from.id);
     await client.query("COMMIT");
     await ctx.answerCbQuery("تم التحقق! انضافت "+reward+" نقطة ⭐");
     await ctx.reply("مبروك! حصلت على "+reward+" نقطة من SubRocket 🚀");
@@ -236,6 +241,7 @@ bot.action(/^adm:/,async ctx=>{
 });
 
 bot.on("text",async ctx=>{
+  if (await bot.handleText?.(ctx)) return;
   if(!isAdmin(ctx)) {
     const state=userState.get(String(ctx.from.id));
     if(!state) return;
@@ -328,6 +334,8 @@ bot.on("text",async ctx=>{
 bot.catch(e=>console.error("Telegram update error:",e));
 async function main(){
   await initializeDatabase();
+  await migrateV3(pool);
+  installV3(bot,pool,adminId);
   console.log("PostgreSQL connected; SubRocket schema is ready.");
   await bot.launch();
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"}],{scope:{type:"default"}});

@@ -43,6 +43,7 @@ async function renewCampaign(client, oldCampaignId, ownerId, initialStatus = "ac
   const found = await client.query("SELECT * FROM campaigns WHERE id=$1 AND owner_id=$2", [Number(oldCampaignId), String(ownerId)]);
   if (!found.rowCount) throw new Error("Campaign not found or not owned by user");
   const old = found.rows[0];
+  if (!["completed", "expired", "cancelled"].includes(old.status)) throw new Error("Only completed, expired or cancelled campaigns can be renewed");
   const channel = await client.query("SELECT 1 FROM channel_owners WHERE owner_id=$1 AND username=REPLACE($2,'@','') AND verified=TRUE", [String(ownerId), old.channel_username]);
   if (!channel.rowCount) throw new Error("The channel is not saved and verified for this owner");
   const renewed = await createCampaign(client, {

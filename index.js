@@ -107,8 +107,12 @@ async function showAdminPoints(ctx) {
 async function showAdminSettings(ctx) {
   const rate=await pointsPerMember();
   const maintenance=await setting("maintenance_mode","false");
-  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
+  const retention=await setting("retention_verification_enabled","false");
+  const retentionHours=await setting("retention_hours","24");
+  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n🛡️ التحقق من الاحتفاظ: "+(retention==="true"?"مفعّل":"متوقف")+"\n⏳ مدة التحقق: "+retentionHours+" ساعة\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
     [Markup.button.callback("✏️ تغيير تكلفة العضو","adm:rate")],
+    [Markup.button.callback(retention==="true"?"⛔ إيقاف التحقق المؤجل":"🛡️ تفعيل التحقق المؤجل","adm:retention")],
+    [Markup.button.callback("⏳ تغيير مدة التحقق","adm:retention_hours")],
     [Markup.button.callback(maintenance==="true"?"🟢 إيقاف الصيانة":"🔴 تفعيل الصيانة","adm:maintenance")],
     [Markup.button.callback("⬅️ رجوع","adm:home")]
   ])});
@@ -273,6 +277,12 @@ bot.action(/^adm:/,async ctx=>{
       return ctx.reply("أرسل أيدي المستخدم الرقمي"+(action==="adm:point_check"?" لعرض رصيده.":" ثم المبلغ بالنقاط، مثال: 123456789 500."));
     }
     if(action==="adm:rate") {adminState.set(adminId,{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
+    if(action==="adm:retention") {
+      const current=await setting("retention_verification_enabled","false");
+      await setSetting("retention_verification_enabled",current==="true"?"false":"true");
+      return showAdminSettings(ctx);
+    }
+    if(action==="adm:retention_hours") {adminState.set(adminId,{type:"retention_hours"});return ctx.reply("أرسل مدة التحقق بالساعات من 6 إلى 168. مثال: 24");}
     if(action==="adm:maintenance") {
       const current=await setting("maintenance_mode","false");
       await setSetting("maintenance_mode",current==="true"?"false":"true");
@@ -371,6 +381,11 @@ bot.on("text",async ctx=>{
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
       await setSetting("points_per_member",input);adminState.delete(adminId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");
+    }
+    if(state.type==="retention_hours") {
+      if(!/^\d+$/.test(input)||Number(input)<6||Number(input)>168) return ctx.reply("مدة التحقق يجب أن تكون بين 6 و168 ساعة.");
+      await setSetting("retention_hours",input);adminState.delete(adminId);
+      return ctx.reply("تم تحديث مدة التحقق إلى "+input+" ساعة. تطبق على المطالبات الجديدة فقط.");
     }
     if(state.type==="broadcast") {
       if(!input||input.length>4000) return ctx.reply("الرسالة فارغة أو أطول من الحد المسموح.");

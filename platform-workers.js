@@ -83,14 +83,14 @@ async function processRetentionQueue(pool, bot, rewardReferral, limit = 25) {
 }
 
 async function expireCampaigns(pool, limit = 25) {
-  const due = await pool.query("SELECT id FROM campaigns WHERE status IN ('active','paused') AND expires_at IS NOT NULL AND expires_at<=NOW() ORDER BY expires_at LIMIT $1", [limit]);
+  const due = await pool.query("SELECT id FROM campaigns WHERE status IN ('active','paused','pending_review') AND expires_at IS NOT NULL AND expires_at<=NOW() ORDER BY expires_at LIMIT $1", [limit]);
   let expired = 0;
   for (const item of due.rows) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       const r = await client.query("SELECT * FROM campaigns WHERE id=$1 FOR UPDATE", [item.id]);
-      if (!r.rowCount || !["active", "paused"].includes(r.rows[0].status) || !r.rows[0].expires_at || new Date(r.rows[0].expires_at) > new Date()) {
+      if (!r.rowCount || !["active", "paused", "pending_review"].includes(r.rows[0].status) || !r.rows[0].expires_at || new Date(r.rows[0].expires_at) > new Date()) {
         await client.query("ROLLBACK");
         continue;
       }

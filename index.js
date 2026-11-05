@@ -4,6 +4,8 @@ const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
 const { migrateV4 } = require("./platform-v4");
 const { createCampaign, cancelCampaign, changeCampaignStatus } = require("./campaign-engine");
+const { applyLedgerEntry, recordCampaignEvent } = require("./platform-v4");
+const { startPlatformWorkers } = require("./platform-workers");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminId = String(process.env.TELEGRAM_ADMIN_ID || "");
@@ -151,14 +153,25 @@ bot.action(/^claim:(\d+)$/,async ctx=>{
     const joined=["member","administrator","creator"].includes(m.status)||(m.status==="restricted"&&m.is_member);
     if(!joined){await client.query("ROLLBACK");return ctx.answerCbQuery("انضم للقناة أولاً ثم تحقق.",{show_alert:true});}
     const reward=Number(c.reward_per_member),left=Number(c.slots_remaining)-1;
-    await client.query("INSERT INTO campaign_claims(campaign_id,user_id,reward) VALUES($1,$2,$3)",[id,String(ctx.from.id),reward]);
-    await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[reward,String(ctx.from.id)]);
-    await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_reward',$3)",[String(ctx.from.id),reward,id]);
-    await client.query("UPDATE campaigns SET slots_remaining=$1,status=$2 WHERE id=$3",[left,left===0?"completed":"active",id]);
-    await rewardReferral(client,pool,ctx.from.id);
+    const retentionSetting=await setting("retention_verification_enabled","false");
+    const retentionEnabled=retentionSetting==="true";
+    const hoursRaw=Number.parseInt(await setting("retention_hours","24"),10);
+    const retentionHours=Number.isInteger(hoursRaw)&&hoursRaw>=1&&hoursRaw<=168?hoursRaw:24;
+    const claim=await client.query(
+      "INSERT INTO campaign_claims(campaign_id,user_id,reward,verification_status,reward_paid,verification_due_at,verified_at) VALUES($1,$2,$3,CASE WHEN $4 THEN 'pending' ELSE 'verified' END,NOT $4,CASE WHEN $4 THEN NOW()+($5::text||' hours')::interval ELSE NULL END,CASE WHEN $4 THEN NULL ELSE NOW() END) RETURNING id",
+      [id,String(ctx.from.id),reward,retentionEnabled,retentionHours]
+    );
+    await client.query("UPDATE campaigns SET slots_remaining=$1,status=$2,completed_at=CASE WHEN $1=0 THEN NOW() ELSE completed_at END,updated_at=NOW() WHERE id=$3",[left,left===0?"completed":"active",id]);
+    if(retentionEnabled){
+      await recordCampaignEvent(client,id,ctx.from.id,"claim_pending_retention",{claimId:claim.rows[0].id,userId:String(ctx.from.id),verificationHours:retentionHours});
+    }else{
+      await applyLedgerEntry(client,{userId:ctx.from.id,amount:String(reward),reason:"campaign_reward",referenceId:id,idempotencyKey:"claim:"+claim.rows[0].id+":instant-reward"});
+      await rewardReferral(client,pool,ctx.from.id);
+      await recordCampaignEvent(client,id,ctx.from.id,"claim_verified",{claimId:claim.rows[0].id,userId:String(ctx.from.id)});
+    }
     await client.query("COMMIT");
-    await ctx.answerCbQuery("تم التحقق! انضافت "+reward+" نقطة ⭐");
-    await ctx.reply("مبروك! حصلت على "+reward+" نقطة من SubRocket 🚀");
+    await ctx.answerCbQuery(retentionEnabled?"تم تسجيل اشتراكك. المكافأة بعد التحقق من استمرار العضوية.":"تم التحقق! انضافت "+reward+" نقطة ⭐");
+    await ctx.reply(retentionEnabled?"⏳ تم تسجيل مطالبتك للحملة #"+id+". ستُضاف المكافأة بعد "+retentionHours+" ساعة إذا بقيت مشتركاً بالقناة.":"مبروك! حصلت على "+reward+" نقطة من SubRocket 🚀");
   }catch(e){await client.query("ROLLBACK");console.error("Claim failed:",e.message);await ctx.answerCbQuery("صار خطأ أثناء التحقق.",{show_alert:true});}
   finally{client.release();}
 });
@@ -330,7 +343,8 @@ async function main(){
   await migrateV3(pool);
   await migrateV4(pool,adminId);
   installV3(bot,pool,adminId);
-  console.log("PostgreSQL connected; SubRocket schema is ready.");
+  startPlatformWorkers(pool,bot,rewardReferral);
+  console.log("PostgreSQL connected; SubRocket v0.0.4 schema and workers are ready.");
   await bot.launch();
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"}],{scope:{type:"default"}});
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"},{command:"adminadmin",description:"لوحة تحكم المدير"}],{scope:{type:"chat",chat_id:Number(adminId)}});

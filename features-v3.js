@@ -1,4 +1,5 @@
 const { Markup } = require("telegraf");
+const { claimDailyReward, getUserAnalytics } = require("./reward-center");
 const userStates = new Map();
 const adminStates = new Map();
 
@@ -30,6 +31,7 @@ function menu() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("💎 المحفظة","v3:wallet"),Markup.button.callback("🏆 المتصدرون","v3:leaders:all")],
     [Markup.button.callback("🎖️ إنجازاتي","v3:achievements"),Markup.button.callback("🎁 استرداد كود","v3:coupon")],
+    [Markup.button.callback("📅 مكافأة اليوم","v4:daily"),Markup.button.callback("📊 إحصائياتي","v4:analytics")],
     [Markup.button.callback("🤝 دعوة الأصدقاء","v3:referrals"),Markup.button.callback("🔔 إشعاراتي","v3:notifications")],
     [Markup.button.callback("🎧 الدعم الفني","v3:support"),Markup.button.callback("⬅️ الرئيسية","home")]
   ]);
@@ -172,6 +174,20 @@ async function handleText(ctx,pool,adminId,bot) {
 function installV3(bot,pool,adminId){
   bot.action("v3:menu",async c=>{await c.answerCbQuery();await c.reply("مركز SubRocket 🚀",menu());});
   bot.action("v3:wallet",async c=>{await c.answerCbQuery();await wallet(c,pool);});
+  bot.action("v4:daily",async c=>{
+    await c.answerCbQuery();
+    try{
+      const result=await claimDailyReward(pool,c.from.id);
+      if(!result.claimed)return c.reply("📅 استلمت مكافأة اليوم مسبقاً.\n🔥 سلسلة الاستمرارية: "+result.streakDays+" يوم.");
+      return c.reply("🎁 تم استلام مكافأة اليوم!\n💎 النقاط: "+result.points+"\n🔥 سلسلة الاستمرارية: "+result.streakDays+" يوم"+(Number(result.bonusPoints)>0?"\n🏆 مكافأة الاستمرارية: "+result.bonusPoints:""),menu());
+    }catch(e){console.error("Daily reward failed:",e.message);return c.reply("تعذر استلام المكافأة حالياً. حاول لاحقاً.");}
+  });
+  bot.action("v4:analytics",async c=>{
+    await c.answerCbQuery();
+    const a=await getUserAnalytics(pool,c.from.id);
+    if(!a)return c.reply("لم يتم العثور على حسابك.");
+    await c.reply("📊 إحصائيات حسابك\n\n💎 الرصيد الحالي: "+a.points+"\n📈 النقاط المكتسبة: "+a.earned+"\n📉 النقاط المصروفة: "+a.spent+"\n✅ الاشتراكات المتحققة: "+a.verified_claims+"\n⏳ المطالبات قيد التحقق: "+a.pending_claims+"\n🤝 الإحالات: "+a.referrals+" (المكافآت: "+a.rewarded_referrals+")\n🛡️ السمعة: "+a.reputation_score+"/100 · المستوى "+a.reputation_level,menu());
+  });
   bot.action(/^v3:leaders:(all|week|month)$/,async c=>{await c.answerCbQuery();await leaders(c,pool,c.match[1]);});
   bot.action("v3:achievements",async c=>{await c.answerCbQuery();await achievements(c,pool);});
   bot.action("v3:notifications",async c=>{await c.answerCbQuery();await notifications(c,pool);});

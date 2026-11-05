@@ -55,7 +55,7 @@ async function requireAdmin(ctx) {
   else if(action==="adm:point_add"||action==="adm:point_sub")permission="wallet.adjust";
   else if(action==="adm:users"||action==="adm:user_manage")permission="users.read";
   else if(/^adm:(ban|unban):/.test(action))permission="users.manage";
-  else if(action==="adm:campaigns"||/^adm:campaign:\\d+$/.test(action))permission="campaigns.read";
+  else if(action==="adm:campaigns"||/^adm:campaign:\d+$/.test(action))permission="campaigns.read";
   else if(/^adm:(cancel_campaign|campaign_pause|campaign_resume):/.test(action))permission="campaigns.manage";
   else if(action==="adm:stats")permission="analytics.read";
   else if(action==="adm:settings"||action==="adm:rate"||action==="adm:maintenance"||action==="adm:retention"||action==="adm:retention_hours")permission="settings.manage";
@@ -458,7 +458,7 @@ bot.on("text",async ctx=>{
     }
     if(state.type==="staff_grant") {
       const parts=input.split(/\\s+/);
-      if(!/^\\d+$/.test(parts[0]||"")||parts.length!==2||!["admin","moderator","support","analyst"].includes(parts[1]))return ctx.reply("الصيغة غير صحيحة. مثال: 123456789 support");
+      if(!/^\d+$/.test(parts[0]||"")||parts.length!==2||!["admin","moderator","support","analyst"].includes(parts[1]))return ctx.reply("الصيغة غير صحيحة. مثال: 123456789 support");
       await grantStaffRole(pool,ctx.from.id,parts[0],parts[1],adminId);
       adminState.delete(actorId);
       await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'staff_role_grant',$2,$3::jsonb)",[actorId,parts[0],JSON.stringify({role:parts[1]})]);

@@ -12,6 +12,7 @@ if (!/^\d+$/.test(adminId)) throw new Error("TELEGRAM_ADMIN_ID must be a valid n
 const pool = new Pool({ connectionString: databaseUrl, ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false }, max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 });
 const bot = new Telegraf(token);
 const adminState = new Map();
+const userState = new Map();
 const DEFAULT_POINTS_PER_MEMBER = Math.max(1, Number.parseInt(process.env.POINTS_PER_MEMBER || "100", 10));
 
 async function initializeDatabase() {
@@ -42,8 +43,7 @@ async function pointsPerMember() {
 const isAdmin = (ctx) => !!ctx.from && String(ctx.from.id) === adminId;
 async function requireAdmin(ctx) {
   if (isAdmin(ctx)) return true;
-  if (ctx.callbackQuery) await ctx.answerCbQuery("غير مسموح لك باستخدام لوحة الإدارة.", {show_alert:true}).catch(()=>{});
-  else await ctx.reply("هذا الأمر مخصص لمدير البوت فقط.");
+  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(()=>{});
   return false;
 }
 async function registerUser(ctx) {
@@ -59,8 +59,9 @@ async function isChannelAdmin(channel,userId) {
 }
 function mainKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("📋 الحملات","campaigns")],
-    [Markup.button.callback("➕ إنشاء حملة","campaign_help"),Markup.button.callback("ℹ️ المساعدة","help")]
+    [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
+    [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
+    [Markup.button.callback("ℹ️ حول SubRocket","help")]
   ]);
 }
 function adminKeyboard() {
@@ -116,53 +117,14 @@ async function showAdminCampaigns(ctx) {
 }
 bot.start(async ctx=>{
   await registerUser(ctx);
-  if ((await setting("maintenance_mode","false"))==="true" && !isAdmin(ctx)) return ctx.reply("البوت حالياً في وضع الصيانة. حاول لاحقاً.");
-  await ctx.reply("أهلاً بيك في SubRocket 🚀\n\nاجمع النقاط من خلال الانضمام الاختياري للقنوات المشاركة، واستخدم رصيدك لتمويل قناتك.\n\nكل اشتراك لازم يكون حقيقي وباختيار المستخدم.",mainKeyboard());
+  const user=await pool.query("SELECT is_banned FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);
+  if(user.rows[0]?.is_banned) return;
+  if ((await setting("maintenance_mode","false"))==="true" && !isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
+  await ctx.reply("أهلاً بيك في SubRocket 🚀\nمنصة النقاط والحملات للقنوات. استخدم الأزرار أدناه للتحكم بكل شيء.",mainKeyboard());
 });
-bot.command("admin",async ctx=>{if(await requireAdmin(ctx)) await showAdmin(ctx);});
+bot.command("adminadmin",async ctx=>{ if(!isAdmin(ctx)) return; await showAdmin(ctx); });
 bot.command("help",async ctx=>{
-  await ctx.reply("أوامر SubRocket 🚀\n/points — رصيدك\n/campaigns — الحملات المتاحة\n/promote @channel 10 — إنشاء حملة\n/help — المساعدة\n\nلإنشاء حملة لازم تكون مشرف بالقناة وتضيف البوت مشرفاً حتى يتحقق من الاشتراكات. استخدم /admin للإدارة (للمدير فقط).");
-});
-bot.command("points",async ctx=>{
-  await registerUser(ctx);
-  const r=await pool.query("SELECT points,is_banned FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);
-  if(r.rows[0].is_banned) return ctx.reply("حسابك موقوف عن استخدام البوت.");
-  await ctx.reply("رصيدك الحالي: "+r.rows[0].points+" نقطة ⭐");
-});
-bot.command("campaigns",async ctx=>{
-  await registerUser(ctx);
-  if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("البوت في وضع الصيانة حالياً.");
-  const r=await pool.query("SELECT id,channel_username,slots_remaining,reward_per_member FROM campaigns WHERE status='active' AND slots_remaining>0 ORDER BY created_at DESC LIMIT 10");
-  if(!r.rows.length) return ctx.reply("ماكو حملات متاحة حالياً. ارجع بعدين 🚀");
-  const buttons=r.rows.map(c=>[Markup.button.url("فتح "+c.channel_username+" · +"+c.reward_per_member+" نقطة","https://t.me/"+c.channel_username.replace(/^@/,"")),Markup.button.callback("تحقق واستلم","claim:"+c.id)]);
-  await ctx.reply("الحملات المتاحة — انضم للقناة باختيارك، وبعدها اضغط تحقق واستلم:",Markup.inlineKeyboard(buttons));
-});
-bot.command("promote",async ctx=>{
-  await registerUser(ctx);
-  if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("البوت في وضع الصيانة حالياً.");
-  const p=(ctx.message.text||"").trim().split(/\s+/);
-  if(p.length!==3||!/^@[A-Za-z0-9_]{5,32}$/.test(p[1])||!/^\d+$/.test(p[2])) return ctx.reply("الصيغة الصحيحة:\n/promote @channel 10");
-  const channel=p[1],slots=Number(p[2]);
-  if(!Number.isSafeInteger(slots)||slots<1||slots>10000) return ctx.reply("عدد الأعضاء لازم يكون بين 1 و10000.");
-  try {
-    const chat=await bot.telegram.getChat(channel);
-    if(chat.type!=="channel") return ctx.reply("المعرّف المدخل مو قناة عامة.");
-    const me=await bot.telegram.getMe();
-    if(!(await isChannelAdmin(channel,me.id))) return ctx.reply("لازم تضيف البوت مشرفاً بالقناة أولاً.");
-    const rate=await pointsPerMember(),cost=BigInt(slots)*BigInt(rate);
-    const client=await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const u=await client.query("SELECT points,is_banned FROM users WHERE telegram_id=$1 FOR UPDATE",[String(ctx.from.id)]);
-      if(!u.rowCount||u.rows[0].is_banned) {await client.query("ROLLBACK");return ctx.reply("حسابك غير متاح لإنشاء الحملات.");}
-      if(BigInt(u.rows[0].points)<cost) {await client.query("ROLLBACK");return ctx.reply("رصيدك ما يكفي. تحتاج "+cost+" نقطة.");}
-      await client.query("UPDATE users SET points=points-$1,updated_at=NOW() WHERE telegram_id=$2",[cost.toString(),String(ctx.from.id)]);
-      const c=await client.query("INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member) VALUES($1,$2,$3,$4,$4,$5) RETURNING id",[String(ctx.from.id),channel,chat.title||channel,slots,rate]);
-      await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_funding',$3)",[String(ctx.from.id),(-cost).toString(),c.rows[0].id]);
-      await client.query("COMMIT");
-      await ctx.reply("تم إنشاء حملتك 🚀\nالقناة: "+channel+"\nالأعضاء: "+slots+"\nالنقاط المحجوزة: "+cost+"\nرقم الحملة: #"+c.rows[0].id);
-    } catch(e){await client.query("ROLLBACK");throw e;} finally{client.release();}
-  } catch(e){console.error("Campaign creation failed:",e.message);await ctx.reply("ما گدرنا ننشئ الحملة. تأكد من القناة وصلاحيات البوت.");}
+  await ctx.reply("SubRocket 🚀\nكل خدمات البوت متاحة من خلال الأزرار بالأسفل.\n\n⭐ الرصيد: عرض نقاطك.\n🚀 الحملات: استعراض الحملات المتاحة.\n➕ إنشاء حملة: تمويل قناتك بالنقاط.",mainKeyboard());
 });
 bot.action(/^claim:(\d+)$/,async ctx=>{
   await registerUser(ctx);
@@ -193,9 +155,25 @@ bot.action(/^claim:(\d+)$/,async ctx=>{
   finally{client.release();}
 });
 bot.action("my_points",async ctx=>{await registerUser(ctx);const r=await pool.query("SELECT points FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);await ctx.answerCbQuery();await ctx.reply("رصيدك الحالي: "+r.rows[0].points+" نقطة ⭐");});
-bot.action("campaigns",async ctx=>{await ctx.answerCbQuery();await ctx.reply("استخدم /campaigns لعرض الحملات.");});
-bot.action("campaign_help",async ctx=>{await ctx.answerCbQuery();await ctx.reply("لإنشاء حملة استخدم:\n/promote @channel 10\nلازم تكون مشرف بالقناة وتضيف البوت مشرفاً بيها.");});
-bot.action("help",async ctx=>{await ctx.answerCbQuery();await ctx.reply("استخدم /help لعرض التعليمات.");});
+bot.action("campaigns",async ctx=>{
+  await ctx.answerCbQuery();
+  if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
+  const r=await pool.query("SELECT id,channel_username,slots_remaining,reward_per_member FROM campaigns WHERE status='active' AND slots_remaining>0 ORDER BY created_at DESC LIMIT 12");
+  if(!r.rows.length) return ctx.reply("لا توجد حملات متاحة حالياً.",Markup.inlineKeyboard([[Markup.button.callback("⬅️ القائمة الرئيسية","home")]]));
+  const rows=[];
+  for(const x of r.rows){ rows.push([Markup.button.url("📢 "+x.channel_username,"https://t.me/"+x.channel_username.replace(/^@/,""))]); rows.push([Markup.button.callback("تحقق واستلم +"+x.reward_per_member+" ⭐","claim:"+x.id)]); }
+  rows.push([Markup.button.callback("⬅️ القائمة الرئيسية","home")]);
+  return ctx.reply("🚀 الحملات المتاحة\nانضم للقناة باختيارك ثم اضغط تحقق واستلم.",Markup.inlineKeyboard(rows));
+});
+bot.action("campaign_help",async ctx=>{
+  await ctx.answerCbQuery();
+  if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
+  userState.set(String(ctx.from.id),{type:"campaign_channel"});
+  await ctx.reply("➕ إنشاء حملة جديدة\nأرسل معرف قناتك العامة مثل @MyChannel. يجب أن تكون مشرفاً بالقناة وأن تضيف البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("إلغاء","campaign_cancel")]]));
+});
+bot.action("campaign_cancel",async ctx=>{userState.delete(String(ctx.from.id));await ctx.answerCbQuery("تم الإلغاء.");return ctx.reply("تم إلغاء العملية.",mainKeyboard());});
+bot.action("home",async ctx=>{await ctx.answerCbQuery();return ctx.reply("القائمة الرئيسية 🚀",mainKeyboard());});
+bot.action("help",async ctx=>{await ctx.answerCbQuery();return ctx.reply("SubRocket 🚀\nكل التحكم من الأزرار. اختر الرصيد أو الحملات أو إنشاء حملة.",mainKeyboard());});
 
 bot.action(/^adm:/,async ctx=>{
   if(!(await requireAdmin(ctx))) return;
@@ -258,7 +236,37 @@ bot.action(/^adm:/,async ctx=>{
 });
 
 bot.on("text",async ctx=>{
-  if(!isAdmin(ctx)) return;
+  if(!isAdmin(ctx)) {
+    const state=userState.get(String(ctx.from.id));
+    if(!state) return;
+    const input=(ctx.message.text||"").trim();
+    if(input==="إلغاء"){userState.delete(String(ctx.from.id));return ctx.reply("تم إلغاء العملية.",mainKeyboard());}
+    if(state.type==="campaign_channel"){
+      if(!/^@[A-Za-z0-9_]{5,32}$/.test(input)) return ctx.reply("معرف القناة غير صحيح. أرسله بصيغة @ChannelName.");
+      state.channel=input;state.type="campaign_slots";userState.set(String(ctx.from.id),state);
+      return ctx.reply("كم عدد الأعضاء الذين تريدهم؟ أرسل رقماً من 1 إلى 10000.");
+    }
+    if(state.type==="campaign_slots"){
+      if(!/^\d+$/.test(input)||Number(input)<1||Number(input)>10000) return ctx.reply("أرسل عدداً صحيحاً بين 1 و10000.");
+      const slots=Number(input),channel=state.channel;userState.delete(String(ctx.from.id));let client;
+      try{
+        const chat=await bot.telegram.getChat(channel);
+        if(chat.type!=="channel") return ctx.reply("المعرف لا يعود إلى قناة عامة.",mainKeyboard());
+        const me=await bot.telegram.getMe();
+        if(!(await isChannelAdmin(channel,me.id))) return ctx.reply("أضف البوت مشرفاً بالقناة أولاً ثم أعد المحاولة.",mainKeyboard());
+        const rate=await pointsPerMember(),cost=BigInt(slots)*BigInt(rate);client=await pool.connect();await client.query("BEGIN");
+        const u=await client.query("SELECT points,is_banned FROM users WHERE telegram_id=$1 FOR UPDATE",[String(ctx.from.id)]);
+        if(!u.rowCount||u.rows[0].is_banned){await client.query("ROLLBACK");return ctx.reply("حسابك غير متاح لإنشاء الحملات.",mainKeyboard());}
+        if(BigInt(u.rows[0].points)<cost){await client.query("ROLLBACK");return ctx.reply("رصيدك غير كافٍ. تحتاج "+cost+" نقطة، ورصيدك "+u.rows[0].points+".",mainKeyboard());}
+        await client.query("UPDATE users SET points=points-$1,updated_at=NOW() WHERE telegram_id=$2",[cost.toString(),String(ctx.from.id)]);
+        const campaign=await client.query("INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member) VALUES($1,$2,$3,$4,$4,$5) RETURNING id",[String(ctx.from.id),channel,chat.title||channel,slots,rate]);
+        await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_funding',$3)",[String(ctx.from.id),(-cost).toString(),campaign.rows[0].id]);await client.query("COMMIT");
+        return ctx.reply("تم إنشاء حملتك بنجاح 🚀\nالقناة: "+channel+"\nعدد المقاعد: "+slots+"\nالنقاط المحجوزة: "+cost,mainKeyboard());
+      }catch(e){if(client)await client.query("ROLLBACK").catch(()=>{});console.error("Campaign wizard failed:",e.message);return ctx.reply("تعذر إنشاء الحملة. تحقق من القناة وصلاحيات البوت ثم حاول مجدداً.",mainKeyboard());}
+      finally{if(client)client.release();}
+    }
+    return;
+  }
   const state=adminState.get(adminId);
   if(!state) return;
   const input=(ctx.message.text||"").trim();

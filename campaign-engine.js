@@ -25,7 +25,10 @@ async function cancelCampaign(client, campaignId, actorId, reason = "cancelled")
   if (!found.rowCount) return { cancelled: false, reason: "not_found" };
   const campaign = found.rows[0];
   if (["cancelled", "expired", "completed"].includes(campaign.status)) return { cancelled: false, reason: "not_active" };
-  const refund = BigInt(campaign.slots_remaining) * BigInt(campaign.reward_per_member);
+  const pending = await client.query("SELECT COUNT(*)::int count FROM campaign_claims WHERE campaign_id=$1 AND verification_status='pending'",[campaign.id]);
+  const refundableSlots=BigInt(campaign.slots_remaining)+BigInt(pending.rows[0].count);
+  const refund = refundableSlots * BigInt(campaign.reward_per_member);
+  await client.query("UPDATE campaign_claims SET verification_status='rejected',reward_paid=FALSE WHERE campaign_id=$1 AND verification_status='pending'",[campaign.id]);
   if (refund > 0n) {
     await applyLedgerEntry(client, { userId: campaign.owner_id, amount: refund.toString(), reason: "campaign_refund", referenceId: campaign.id, idempotencyKey: "campaign:" + campaign.id + ":refund" });
   }

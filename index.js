@@ -223,7 +223,7 @@ bot.action("help",async ctx=>{await ctx.answerCbQuery();await ctx.reply("است�
 bot.action(/^adm:/,async ctx=>{
   if(!(await requireAdmin(ctx))) return;
   await ctx.answerCbQuery().catch(()=>{});
-  const action=ctx.match[0];
+  const action=ctx.callbackQuery.data;
   try {
     if(action==="adm:home") return showAdmin(ctx,true);
     if(action==="adm:stats") return showAdminStats(ctx);

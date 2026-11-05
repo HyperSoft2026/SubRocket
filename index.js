@@ -3,7 +3,7 @@ const { Telegraf, Markup } = require("telegraf");
 const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
 const { migrateV4 } = require("./platform-v4");
-const { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign } = require("./campaign-engine");
+const { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign, renewCampaign } = require("./campaign-engine");
 const { applyLedgerEntry, recordCampaignEvent, hasPermission, grantStaffRole } = require("./platform-v4");
 const { startPlatformWorkers } = require("./platform-workers");
 
@@ -285,8 +285,36 @@ bot.action(/^owner:campaign:(\d+)$/,async ctx=>{
   const action=c.status==="active"?"pause":c.status==="paused"?"resume":null;
   const rows=[];
   if(action)rows.push([Markup.button.callback(action==="pause"?"⏸️ إيقاف مؤقت":"▶️ استئناف","owner:campaign-action:"+action+":"+c.id)]);
+  if(["active","paused","completed"].includes(c.status))rows.push([Markup.button.callback("⛔ إلغاء الحملة واسترداد المتبقي","owner:campaign-cancel:"+c.id)]);
+  if(["completed","expired","cancelled"].includes(c.status))rows.push([Markup.button.callback("🔄 تجديد هذه الحملة","owner:campaign-renew:"+c.id)]);
   rows.push([Markup.button.callback("⬅️ حملاتي","owner:campaigns")]);
   await ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالحالة: "+c.status+"\nالتصنيف: "+c.category+"\nالمقاعد: "+c.slots_remaining+"/"+c.slots_total+" متبقية\nالمكافأة: "+c.reward_per_member+" نقطة\nالمطالبات المتحققة: "+claims.rows[0].verified+"\nقيد التحقق: "+claims.rows[0].pending+"\nمرفوضة: "+claims.rows[0].rejected+"\nتاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\nالانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"غير محدد"),Markup.inlineKeyboard(rows));
+});
+bot.action(/^owner:campaign-cancel:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const owned=await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[1],String(ctx.from.id)]);
+    if(!owned.rowCount){await client.query("ROLLBACK");return ctx.reply("الحملة غير موجودة أو لا تملكها.");}
+    const result=await cancelCampaign(client,Number(ctx.match[1]),ctx.from.id,"owner_cancelled");
+    if(!result.cancelled){await client.query("ROLLBACK");return ctx.reply("لا يمكن إلغاء الحملة في حالتها الحالية.");}
+    await client.query("COMMIT");
+    await ctx.reply("⛔ تم إلغاء الحملة وإرجاع "+result.refund+" نقطة غير مستخدمة إلى رصيدك.");
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Owner campaign cancellation failed:",e.message);await ctx.reply("تعذر إلغاء الحملة.");}
+  finally{client.release();}
+});
+bot.action(/^owner:campaign-renew:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const reviewRequired=(await setting("campaign_review_required","false"))==="true";
+    const renewed=await renewCampaign(client,Number(ctx.match[1]),ctx.from.id,reviewRequired?"pending_review":"active");
+    await client.query("COMMIT");
+    await ctx.reply("🔄 تم إنشاء حملة جديدة من الحملة السابقة.\nرقم الحملة الجديدة: #"+renewed.id+"\nالحالة: "+(reviewRequired?"قيد المراجعة":"نشطة"));
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Campaign renewal failed:",e.message);await ctx.reply(e.message==="Insufficient points to fund campaign"?"رصيدك غير كافٍ لتجديد الحملة.":"تعذر تجديد الحملة. تأكد من حفظ القناة والتحقق منها.");
+  }finally{client.release();}
 });
 bot.action(/^owner:campaign-action:(pause|resume):(\d+)$/,async ctx=>{
   await ctx.answerCbQuery();

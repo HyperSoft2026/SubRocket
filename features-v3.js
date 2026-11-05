@@ -1,5 +1,6 @@
 const { Markup } = require("telegraf");
 const { claimDailyReward, getUserAnalytics } = require("./reward-center");
+const { hasPermission } = require("./platform-v4");
 const userStates = new Map();
 const adminStates = new Map();
 
@@ -102,7 +103,7 @@ async function notifications(ctx,pool) {
 async function handleText(ctx,pool,adminId,bot) {
   const id=String(ctx.from.id),input=(ctx.message.text||"").trim();
   const adminState=adminStates.get(id);
-  if(id===String(adminId)&&adminStates.has(id)){
+  if(adminStates.has(id)){
     if(input==="إلغاء"){adminStates.delete(id);await ctx.reply("تم الإلغاء.");return true;}
     if(adminState && typeof adminState==="object" && adminState.type==="support_reply"){
       if(input.length>3000){await ctx.reply("الحد الأقصى 3000 حرف.");return true;}
@@ -216,7 +217,7 @@ function installV3(bot,pool,adminId){
   });
 
   bot.action("v3:admin_tickets",async c=>{
-    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    if(!(await hasPermission(pool,c.from.id,"support.read",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}
     await c.answerCbQuery();
     const r=await pool.query("SELECT id,user_id,message,status,created_at FROM support_tickets WHERE status<>'closed' ORDER BY created_at ASC LIMIT 20");
     if(!r.rowCount){await c.reply("🎧 لا توجد تذاكر مفتوحة حالياً.",Markup.inlineKeyboard([[Markup.button.callback("⬅️ لوحة المدير","adm:home")]]));return;}
@@ -225,7 +226,7 @@ function installV3(bot,pool,adminId){
     await c.reply("🎧 تذاكر الدعم المفتوحة ("+r.rowCount+")",Markup.inlineKeyboard(rows));
   });
   bot.action(/^v3:ticket:(\d+)$/,async c=>{
-    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    if(!(await hasPermission(pool,c.from.id,"support.reply",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}
     await c.answerCbQuery();
     const r=await pool.query("SELECT * FROM support_tickets WHERE id=$1",[c.match[1]]);
     if(!r.rowCount){await c.reply("التذكرة غير موجودة.");return;}
@@ -243,7 +244,7 @@ function installV3(bot,pool,adminId){
     await c.answerCbQuery();
     const ticket=await pool.query("SELECT status FROM support_tickets WHERE id=$1",[c.match[1]]);
     if(!ticket.rowCount||ticket.rows[0].status==="closed"){await c.reply("هذه التذكرة مغلقة أو غير موجودة.");return;}
-    adminStates.set(String(adminId),{type:"support_reply",ticketId:Number(c.match[1])});
+    adminStates.set(String(c.from.id),{type:"support_reply",ticketId:Number(c.match[1])});
     await c.reply("أرسل ردك على التذكرة #"+c.match[1]+". سيُحفظ الرد ضمن المحادثة وتبقى التذكرة مفتوحة حتى تغلقها يدوياً. للإلغاء أرسل إلغاء.");
   });
   bot.action(/^v3:ticket_close:(\d+)$/,async c=>{
@@ -260,7 +261,7 @@ function installV3(bot,pool,adminId){
     await c.reply(r.rowCount?"🔒 تم إغلاق التذكرة وإشعار المستخدم.":"التذكرة غير موجودة أو مغلقة مسبقاً.");
   });
 
-  bot.action("v3:admin_coupon",async c=>{if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}await c.answerCbQuery();adminStates.set(String(adminId),"coupon");await c.reply("أرسل: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50\nللإلغاء: إلغاء");});
+  bot.action("v3:admin_coupon",async c=>{if(!(await hasPermission(pool,c.from.id,"rewards.manage",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}await c.answerCbQuery();adminStates.set(String(c.from.id),"coupon");await c.reply("أرسل: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50\nللإلغاء: إلغاء");});
   bot.handleText=c=>handleText(c,pool,adminId,bot);
 }
 module.exports={migrateV3,installV3,applyReferralOnStart,rewardReferral,menu};

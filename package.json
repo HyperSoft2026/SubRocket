@@ -1,8 +1,8 @@
 {
   "name": "subrocket",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
-  "description": "بوت تيليجرام لإدارة النقاط والحملات عبر الأزرار ولوحة مدير خاصة",
+  "description": "منصة تيليجرام لإدارة حملات الاشتراك والنقاط والمكافآت والإحالات",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

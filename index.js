@@ -3,6 +3,7 @@ const { Telegraf, Markup } = require("telegraf");
 const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
 const { migrateV4 } = require("./platform-v4");
+const { createCampaign, cancelCampaign, changeCampaignStatus } = require("./campaign-engine");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminId = String(process.env.TELEGRAM_ADMIN_ID || "");
@@ -226,16 +227,10 @@ bot.action(/^adm:/,async ctx=>{
       const client=await pool.connect();
       try {
         await client.query("BEGIN");
-        const r=await client.query("SELECT * FROM campaigns WHERE id=$1 FOR UPDATE",[Number(cancel[1])]);
-        if(!r.rowCount||r.rows[0].status!=="active"){await client.query("ROLLBACK");return ctx.reply("الحملة غير نشطة أو غير موجودة.");}
-        const c=r.rows[0],refund=BigInt(c.slots_remaining)*BigInt(c.reward_per_member);
-        if(refund>0n) {
-          await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[refund.toString(),String(c.owner_id)]);
-          await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_refund',$3)",[String(c.owner_id),refund.toString(),c.id]);
-        }
-        await client.query("UPDATE campaigns SET status='cancelled',slots_remaining=0 WHERE id=$1",[c.id]);
+        const result=await cancelCampaign(client,Number(cancel[1]),adminId,"admin_cancelled");
+        if(!result.cancelled){await client.query("ROLLBACK");return ctx.reply(result.reason==="not_found"?"الحملة غير موجودة.":"الحملة غير نشطة أو لا يمكن إلغاؤها.");}
         await client.query("COMMIT");
-        await ctx.reply("تم إلغاء الحملة #"+c.id+" وإرجاع "+refund+" نقطة إلى صاحبها.");
+        await ctx.reply("تم إلغاء الحملة #"+cancel[1]+" وإرجاع "+result.refund+" نقطة إلى صاحبها.");
       }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
       return showAdminCampaigns(ctx);
     }
@@ -263,13 +258,9 @@ bot.on("text",async ctx=>{
         const me=await bot.telegram.getMe();
         if(!(await isChannelAdmin(channel,me.id))) return ctx.reply("أضف البوت مشرفاً بالقناة أولاً ثم أعد المحاولة.",mainKeyboard());
         const rate=await pointsPerMember(),cost=BigInt(slots)*BigInt(rate);client=await pool.connect();await client.query("BEGIN");
-        const u=await client.query("SELECT points,is_banned FROM users WHERE telegram_id=$1 FOR UPDATE",[String(ctx.from.id)]);
-        if(!u.rowCount||u.rows[0].is_banned){await client.query("ROLLBACK");return ctx.reply("حسابك غير متاح لإنشاء الحملات.",mainKeyboard());}
-        if(BigInt(u.rows[0].points)<cost){await client.query("ROLLBACK");return ctx.reply("رصيدك غير كافٍ. تحتاج "+cost+" نقطة، ورصيدك "+u.rows[0].points+".",mainKeyboard());}
-        await client.query("UPDATE users SET points=points-$1,updated_at=NOW() WHERE telegram_id=$2",[cost.toString(),String(ctx.from.id)]);
-        const campaign=await client.query("INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member) VALUES($1,$2,$3,$4,$4,$5) RETURNING id",[String(ctx.from.id),channel,chat.title||channel,slots,rate]);
-        await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_funding',$3)",[String(ctx.from.id),(-cost).toString(),campaign.rows[0].id]);await client.query("COMMIT");
-        return ctx.reply("تم إنشاء حملتك بنجاح 🚀\nالقناة: "+channel+"\nعدد المقاعد: "+slots+"\nالنقاط المحجوزة: "+cost,mainKeyboard());
+        const campaign=await createCampaign(client,{ownerId:ctx.from.id,channelUsername:channel,channelTitle:chat.title||channel,slots,rewardPerMember:rate});
+        await client.query("COMMIT");
+        return ctx.reply("تم إنشاء حملتك بنجاح 🚀\nرقم الحملة: #"+campaign.id+"\nالقناة: "+channel+"\nعدد المقاعد: "+slots+"\nالنقاط المحجوزة: "+cost,mainKeyboard());
       }catch(e){if(client)await client.query("ROLLBACK").catch(()=>{});console.error("Campaign wizard failed:",e.message);return ctx.reply("تعذر إنشاء الحملة. تحقق من القناة وصلاحيات البوت ثم حاول مجدداً.",mainKeyboard());}
       finally{if(client)client.release();}
     }

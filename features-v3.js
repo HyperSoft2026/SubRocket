@@ -58,7 +58,7 @@ async function rewardReferral(client,pool,userId) {
   await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[reward,referrer]);
   await client.query("INSERT INTO points_ledger(user_id,amount,reason) VALUES($1,$2,'referral_reward')",[referrer,reward]);
   await client.query("UPDATE referrals SET rewarded_at=NOW(),reward=$1 WHERE referred_id=$2",[reward,String(userId)]);
-  await client.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'referral','مكافأة إحالة','تمت إضافة '+$2+' نقطة بعد تحقق أول اشتراك للمدعو')",[referrer,reward]).catch(()=>{});
+  await client.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'referral','مكافأة إحالة',$2)",[referrer,'تمت إضافة '+reward+' نقطة بعد تحقق أول اشتراك للمدعو']);
   return {referrer,reward};
 }
 async function wallet(ctx,pool) {

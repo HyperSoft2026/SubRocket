@@ -2,6 +2,10 @@ require("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
 const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
+const { migrateV4 } = require("./platform-v4");
+const { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign, renewCampaign } = require("./campaign-engine");
+const { applyLedgerEntry, recordCampaignEvent, hasPermission, grantStaffRole } = require("./platform-v4");
+const { startPlatformWorkers } = require("./platform-workers");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminId = String(process.env.TELEGRAM_ADMIN_ID || "");
@@ -44,8 +48,23 @@ async function pointsPerMember() {
 const isAdmin = (ctx) => !!ctx.from && String(ctx.from.id) === adminId;
 async function requireAdmin(ctx) {
   if (isAdmin(ctx)) return true;
-  if (ctx.callbackQuery) await ctx.answerCbQuery().catch(()=>{});
-  return false;
+  const action=ctx.callbackQuery?.data||"";
+  let permission="users.read";
+  if(action==="adm:stats")permission="analytics.read";
+  else if(action==="adm:points"||action==="adm:point_check")permission="wallet.read";
+  else if(action==="adm:point_add"||action==="adm:point_sub")permission="wallet.adjust";
+  else if(action==="adm:users"||action==="adm:user_manage")permission="users.read";
+  else if(/^adm:(ban|unban):/.test(action))permission="users.manage";
+  else if(action==="adm:campaigns"||/^adm:campaign:\d+$/.test(action))permission="campaigns.read";
+  else if(/^adm:(cancel_campaign|campaign_pause|campaign_resume|approve_campaign|reject_campaign):/.test(action))permission="campaigns.manage";
+  else if(action==="adm:stats")permission="analytics.read";
+  else if(action==="adm:settings"||action==="adm:rate"||action==="adm:maintenance"||action==="adm:retention"||action==="adm:retention_hours"||action==="adm:campaign_review")permission="settings.manage";
+  else if(action==="adm:broadcast")permission="broadcast.send";
+  else if(action==="adm:staff")permission="staff.manage";
+  else if(action==="adm:home")permission="users.read";
+  const allowed=await hasPermission(pool,ctx.from.id,permission,adminId);
+  if(!allowed&&ctx.callbackQuery)await ctx.answerCbQuery("ليس لديك صلاحية لهذه العملية.",{show_alert:true}).catch(()=>{});
+  return allowed;
 }
 async function registerUser(ctx) {
   const u = ctx.from;
@@ -58,13 +77,16 @@ async function isChannelAdmin(channel,userId) {
   const m = await bot.telegram.getChatMember(channel,userId);
   return m.status === "administrator" || m.status === "creator";
 }
-function mainKeyboard() {
-  return Markup.inlineKeyboard([
+function mainKeyboard(isStaff=false) {
+  const rows=[
     [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
     [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
+    [Markup.button.callback("📡 قنواتي","owner:channels"),Markup.button.callback("🔖 المفضلة","my:favorites")],
     [Markup.button.callback("💎 مركز المكافآت","v3:menu")],
     [Markup.button.callback("ℹ️ حول SubRocket","help")]
-  ]);
+  ];
+  if(isStaff)rows.push([Markup.button.callback("🛡️ لوحة الفريق","adm:home")]);
+  return Markup.inlineKeyboard(rows);
 }
 function adminKeyboard() {
   return Markup.inlineKeyboard([
@@ -73,6 +95,7 @@ function adminKeyboard() {
     [Markup.button.callback("🚀 الحملات","adm:campaigns"),Markup.button.callback("⚙️ إعدادات البوت","adm:settings")],
     [Markup.button.callback("🎟️ إنشاء كود مكافأة","v3:admin_coupon")],
     [Markup.button.callback("🎧 تذاكر الدعم","v3:admin_tickets")],
+    [Markup.button.callback("👑 فريق العمل والصلاحيات","adm:staff")],
     [Markup.button.callback("🔄 تحديث اللوحة","adm:home")]
   ]);
 }
@@ -102,8 +125,14 @@ async function showAdminPoints(ctx) {
 async function showAdminSettings(ctx) {
   const rate=await pointsPerMember();
   const maintenance=await setting("maintenance_mode","false");
-  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
+  const retention=await setting("retention_verification_enabled","false");
+  const retentionHours=await setting("retention_hours","24");
+  const reviewRequired=await setting("campaign_review_required","false");
+  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n🛡️ التحقق من الاحتفاظ: "+(retention==="true"?"مفعّل":"متوقف")+"\n⏳ مدة التحقق: "+retentionHours+" ساعة\n🔍 مراجعة الحملات: "+(reviewRequired==="true"?"مفعّلة":"متوقفة")+"\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
     [Markup.button.callback("✏️ تغيير تكلفة العضو","adm:rate")],
+    [Markup.button.callback(retention==="true"?"⛔ إيقاف التحقق المؤجل":"🛡️ تفعيل التحقق المؤجل","adm:retention")],
+    [Markup.button.callback("⏳ تغيير مدة التحقق","adm:retention_hours")],
+    [Markup.button.callback(reviewRequired==="true"?"⛔ إيقاف مراجعة الحملات":"🔍 تفعيل مراجعة الحملات","adm:campaign_review")],
     [Markup.button.callback(maintenance==="true"?"🟢 إيقاف الصيانة":"🔴 تفعيل الصيانة","adm:maintenance")],
     [Markup.button.callback("⬅️ رجوع","adm:home")]
   ])});
@@ -125,7 +154,8 @@ bot.start(async ctx=>{
   const user=await pool.query("SELECT is_banned FROM users WHERE telegram_id=$1",[String(ctx.from.id)]);
   if(user.rows[0]?.is_banned) return;
   if ((await setting("maintenance_mode","false"))==="true" && !isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
-  await ctx.reply("أهلاً بيك في SubRocket 🚀\nمنصة النقاط والحملات للقنوات. استخدم الأزرار أدناه للتحكم بكل شيء.",mainKeyboard());
+  const staff=await pool.query("SELECT role FROM staff_members WHERE user_id=$1",[String(ctx.from.id)]);
+  await ctx.reply("أهلاً بيك في SubRocket 🚀\nمنصة النقاط والحملات للقنوات. استخدم الأزرار أدناه للتحكم بكل شيء.",mainKeyboard(staff.rowCount>0));
 });
 bot.command("adminadmin",async ctx=>{ if(!isAdmin(ctx)) return; await showAdmin(ctx); });
 bot.command("help",async ctx=>{
@@ -149,14 +179,27 @@ bot.action(/^claim:(\d+)$/,async ctx=>{
     const joined=["member","administrator","creator"].includes(m.status)||(m.status==="restricted"&&m.is_member);
     if(!joined){await client.query("ROLLBACK");return ctx.answerCbQuery("انضم للقناة أولاً ثم تحقق.",{show_alert:true});}
     const reward=Number(c.reward_per_member),left=Number(c.slots_remaining)-1;
-    await client.query("INSERT INTO campaign_claims(campaign_id,user_id,reward) VALUES($1,$2,$3)",[id,String(ctx.from.id),reward]);
-    await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[reward,String(ctx.from.id)]);
-    await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_reward',$3)",[String(ctx.from.id),reward,id]);
-    await client.query("UPDATE campaigns SET slots_remaining=$1,status=$2 WHERE id=$3",[left,left===0?"completed":"active",id]);
-    await rewardReferral(client,pool,ctx.from.id);
+    const retentionSetting=await setting("retention_verification_enabled","false");
+    const retentionEnabled=retentionSetting==="true";
+    const hoursRaw=Number.parseInt(await setting("retention_hours","24"),10);
+    const retentionHours=Number.isInteger(hoursRaw)&&hoursRaw>=1&&hoursRaw<=168?hoursRaw:24;
+    const claim=await client.query(
+      "INSERT INTO campaign_claims(campaign_id,user_id,reward,verification_status,reward_paid,verification_due_at,verified_at) VALUES($1,$2,$3,CASE WHEN $4 THEN 'pending' ELSE 'verified' END,NOT $4,CASE WHEN $4 THEN NOW()+($5::text||' hours')::interval ELSE NULL END,CASE WHEN $4 THEN NULL ELSE NOW() END) RETURNING id",
+      [id,String(ctx.from.id),reward,retentionEnabled,retentionHours]
+    );
+    await client.query("UPDATE campaigns SET slots_remaining=$1,status=$2,completed_at=CASE WHEN $1=0 THEN NOW() ELSE completed_at END,updated_at=NOW() WHERE id=$3",[left,left===0?"completed":"active",id]);
+    if(retentionEnabled){
+      await recordCampaignEvent(client,id,ctx.from.id,"claim_pending_retention",{claimId:claim.rows[0].id,userId:String(ctx.from.id),verificationHours:retentionHours});
+    }else{
+      await applyLedgerEntry(client,{userId:ctx.from.id,amount:String(reward),reason:"campaign_reward",referenceId:id,idempotencyKey:"claim:"+claim.rows[0].id+":instant-reward"});
+      await client.query("INSERT INTO user_reputation(user_id,verified_claims) VALUES($1,1) ON CONFLICT(user_id) DO UPDATE SET verified_claims=user_reputation.verified_claims+1,last_calculated_at=NOW()",[String(ctx.from.id)]);
+      await client.query("WITH calc AS (SELECT user_id,GREATEST(0,LEAST(100,verified_claims*2+retained_claims*5-violations*10)) score FROM user_reputation WHERE user_id=$1) UPDATE user_reputation r SET score=calc.score,level=CASE WHEN calc.score>=90 THEN 5 WHEN calc.score>=70 THEN 4 WHEN calc.score>=45 THEN 3 WHEN calc.score>=20 THEN 2 ELSE 1 END FROM calc WHERE r.user_id=calc.user_id",[String(ctx.from.id)]);
+      await rewardReferral(client,pool,ctx.from.id);
+      await recordCampaignEvent(client,id,ctx.from.id,"claim_verified",{claimId:claim.rows[0].id,userId:String(ctx.from.id)});
+    }
     await client.query("COMMIT");
-    await ctx.answerCbQuery("تم التحقق! انضافت "+reward+" نقطة ⭐");
-    await ctx.reply("مبروك! حصلت على "+reward+" نقطة من SubRocket 🚀");
+    await ctx.answerCbQuery(retentionEnabled?"تم تسجيل اشتراكك. المكافأة بعد التحقق من استمرار العضوية.":"تم التحقق! انضافت "+reward+" نقطة ⭐");
+    await ctx.reply(retentionEnabled?"⏳ تم تسجيل مطالبتك للحملة #"+id+". ستُضاف المكافأة بعد "+retentionHours+" ساعة إذا بقيت مشتركاً بالقناة.":"مبروك! حصلت على "+reward+" نقطة من SubRocket 🚀");
   }catch(e){await client.query("ROLLBACK");console.error("Claim failed:",e.message);await ctx.answerCbQuery("صار خطأ أثناء التحقق.",{show_alert:true});}
   finally{client.release();}
 });
@@ -164,18 +207,147 @@ bot.action("my_points",async ctx=>{await registerUser(ctx);const r=await pool.qu
 bot.action("campaigns",async ctx=>{
   await ctx.answerCbQuery();
   if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
-  const r=await pool.query("SELECT id,channel_username,slots_remaining,reward_per_member FROM campaigns WHERE status='active' AND slots_remaining>0 ORDER BY created_at DESC LIMIT 12");
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,category,description FROM campaigns WHERE status='active' AND slots_remaining>0 AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY created_at DESC LIMIT 12");
   if(!r.rows.length) return ctx.reply("لا توجد حملات متاحة حالياً.",Markup.inlineKeyboard([[Markup.button.callback("⬅️ القائمة الرئيسية","home")]]));
   const rows=[];
-  for(const x of r.rows){ rows.push([Markup.button.url("📢 "+x.channel_username,"https://t.me/"+x.channel_username.replace(/^@/,""))]); rows.push([Markup.button.callback("تحقق واستلم +"+x.reward_per_member+" ⭐","claim:"+x.id)]); }
+  for(const x of r.rows){
+    rows.push([Markup.button.callback("📋 "+x.channel_username+" · "+x.category+" · "+x.slots_remaining+" مقعد","campaign:detail:"+x.id)]);
+    rows.push([Markup.button.url("📢 فتح القناة","https://t.me/"+x.channel_username.replace(/^@/,"")),Markup.button.callback("⭐ +"+x.reward_per_member,"claim:"+x.id)]);
+  }
   rows.push([Markup.button.callback("⬅️ القائمة الرئيسية","home")]);
-  return ctx.reply("🚀 الحملات المتاحة\nانضم للقناة باختيارك ثم اضغط تحقق واستلم.",Markup.inlineKeyboard(rows));
+  return ctx.reply("🚀 الحملات المتاحة\nاختر حملة لعرض تفاصيلها، ثم انضم للقناة واطلب التحقق.",Markup.inlineKeyboard(rows));
+});
+bot.action(/^campaign:detail:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT c.*,u.first_name,u.username FROM campaigns c JOIN users u ON u.telegram_id=c.owner_id WHERE c.id=$1",[ctx.match[1]]);
+  if(!r.rowCount)return ctx.reply("الحملة غير موجودة.");
+  const c=r.rows[0],remaining=Number(c.slots_remaining),completed=Number(c.slots_total)-remaining;
+  const fav=await pool.query("SELECT 1 FROM user_favorites WHERE user_id=$1 AND campaign_id=$2",[String(ctx.from.id),c.id]);
+  const owner=c.first_name||c.username||String(c.owner_id);
+  const text="🚀 تفاصيل الحملة #"+c.id+"\n\n📢 القناة: "+c.channel_username+"\n👤 صاحب الحملة: "+owner+"\n🏷️ التصنيف: "+c.category+"\n📝 الوصف: "+(c.description||"لا يوجد وصف إضافي.")+"\n\n🎯 المقاعد المطلوبة: "+c.slots_total+"\n✅ المطالبات المسجلة: "+completed+"\n🪑 المقاعد المتبقية: "+remaining+"\n💎 مكافأة الاشتراك: "+c.reward_per_member+" نقطة\n📅 تاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\n⏳ الانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"بدون موعد انتهاء")+"\n📌 الحالة: "+c.status;
+  const rows=[[Markup.button.url("📢 فتح القناة","https://t.me/"+c.channel_username.replace(/^@/,""))],[Markup.button.callback("تحقق واستلم +"+c.reward_per_member+" ⭐","claim:"+c.id)],[Markup.button.callback(fav.rowCount?"🔖 إزالة من المفضلة":"🔖 حفظ بالمفضلة","campaign:favorite:"+c.id)],[Markup.button.callback("⬅️ الحملات","campaigns")]];
+  await ctx.reply(text,Markup.inlineKeyboard(rows));
+});
+bot.action(/^campaign:favorite:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const id=String(ctx.from.id),campaignId=Number(ctx.match[1]);
+  const removed=await pool.query("DELETE FROM user_favorites WHERE user_id=$1 AND campaign_id=$2 RETURNING campaign_id",[id,campaignId]);
+  if(!removed.rowCount)await pool.query("INSERT INTO user_favorites(user_id,campaign_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[id,campaignId]);
+  await ctx.reply(removed.rowCount?"تمت إزالة الحملة من المفضلة.":"تم حفظ الحملة في المفضلة. يمكنك الرجوع إليها من القائمة الرئيسية.");
+});
+bot.action("my:favorites",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT c.id,c.channel_username,c.reward_per_member,c.slots_remaining,c.category FROM user_favorites f JOIN campaigns c ON c.id=f.campaign_id WHERE f.user_id=$1 ORDER BY f.created_at DESC LIMIT 20",[String(ctx.from.id)]);
+  const rows=r.rows.map(c=>[Markup.button.callback("🔖 "+c.channel_username+" · "+c.category+" · +"+c.reward_per_member,"campaign:detail:"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ الرئيسية","home")]);
+  await ctx.reply("🔖 حملاتي المفضلة\n"+(r.rowCount?"اختر حملة لعرض تفاصيلها.":"لا توجد حملات محفوظة حالياً."),Markup.inlineKeyboard(rows));
 });
 bot.action("campaign_help",async ctx=>{
   await ctx.answerCbQuery();
   if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
+  const channels=await pool.query("SELECT id,username,title FROM channel_owners WHERE owner_id=$1 AND verified=TRUE ORDER BY created_at DESC",[String(ctx.from.id)]);
+  if(channels.rowCount){
+    const rows=channels.rows.map(ch=>[Markup.button.callback("📢 "+ch.title+" · "+(ch.username||ch.chat_id),"owner:use:"+ch.id)]);
+    rows.push([Markup.button.callback("➕ إضافة قناة جديدة","owner:add")],[Markup.button.callback("إلغاء","campaign_cancel")]);
+    return ctx.reply("اختر قناة محفوظة لإنشاء الحملة:",Markup.inlineKeyboard(rows));
+  }
   userState.set(String(ctx.from.id),{type:"campaign_channel"});
   await ctx.reply("➕ إنشاء حملة جديدة\nأرسل معرف قناتك العامة مثل @MyChannel. يجب أن تكون مشرفاً بالقناة وأن تضيف البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("إلغاء","campaign_cancel")]]));
+});
+bot.action("owner:channels",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query(`
+    SELECT ch.id,ch.username,ch.title,ch.verified,
+      COUNT(DISTINCT c.id)::int campaigns,
+      COUNT(DISTINCT c.id) FILTER(WHERE c.status='active')::int active_campaigns,
+      COALESCE(SUM((SELECT COUNT(*) FROM campaign_claims cl WHERE cl.campaign_id=c.id AND cl.verification_status='verified')),0)::int verified_members,
+      COALESCE(SUM((SELECT COALESCE(SUM(cl.reward),0) FROM campaign_claims cl WHERE cl.campaign_id=c.id AND cl.reward_paid=TRUE)),0)::text rewards_paid
+    FROM channel_owners ch
+    LEFT JOIN campaigns c ON c.owner_id=ch.owner_id AND REPLACE(c.channel_username,'@','')=ch.username
+    WHERE ch.owner_id=$1
+    GROUP BY ch.id ORDER BY ch.created_at DESC
+  `,[String(ctx.from.id)]);
+  const lines=r.rows.map((ch,i)=>(i+1)+". "+ch.title+" · "+(ch.username?"@"+ch.username:"قناة خاصة")+" · "+(ch.verified?"موثقة":"غير موثقة")+"\n   الحملات: "+ch.campaigns+" (نشطة: "+ch.active_campaigns+") · اشتراكات متحققة: "+ch.verified_members+" · مكافآت مصروفة: "+ch.rewards_paid);
+  await ctx.reply("📡 قنواتي وإحصائياتها\n\n"+(lines.join("\n\n")||"لم تحفظ أي قناة بعد.")+"\n\nيمكنك حفظ القنوات بعد التحقق من ملكيتك وإضافة البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("➕ إضافة قناة","owner:add")],[Markup.button.callback("🚀 حملاتي","owner:campaigns")],[Markup.button.callback("⬅️ الرئيسية","home")]]));
+});
+bot.action("owner:campaigns",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,status,expires_at FROM campaigns WHERE owner_id=$1 ORDER BY created_at DESC LIMIT 20",[String(ctx.from.id)]);
+  const rows=r.rows.map(c=>[Markup.button.callback("#"+c.id+" · "+c.channel_username+" · "+c.status+" · "+c.slots_remaining+"/"+c.slots_total,"owner:campaign:"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ قنواتي","owner:channels")]);
+  await ctx.reply("🚀 حملاتي\nاختر حملة لعرض أدائها وإيقافها أو استئنافها.",Markup.inlineKeyboard(rows));
+});
+bot.action(/^owner:campaign:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,status,category,created_at,expires_at FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[1],String(ctx.from.id)]);
+  if(!r.rowCount)return ctx.reply("الحملة غير موجودة أو لا تملك صلاحية إدارتها.");
+  const c=r.rows[0],claims=await pool.query("SELECT COUNT(*) FILTER(WHERE verification_status='verified')::int verified,COUNT(*) FILTER(WHERE verification_status='pending')::int pending,COUNT(*) FILTER(WHERE verification_status='rejected')::int rejected FROM campaign_claims WHERE campaign_id=$1",[c.id]);
+  const action=c.status==="active"?"pause":c.status==="paused"?"resume":null;
+  const rows=[];
+  if(action)rows.push([Markup.button.callback(action==="pause"?"⏸️ إيقاف مؤقت":"▶️ استئناف","owner:campaign-action:"+action+":"+c.id)]);
+  if(["active","paused"].includes(c.status)||(c.status==="completed"&&Number(claims.rows[0].pending)>0))rows.push([Markup.button.callback("⛔ إلغاء الحملة واسترداد المتبقي","owner:campaign-cancel:"+c.id)]);
+  if(["completed","expired","cancelled"].includes(c.status))rows.push([Markup.button.callback("🔄 تجديد هذه الحملة","owner:campaign-renew:"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ حملاتي","owner:campaigns")]);
+  await ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالحالة: "+c.status+"\nالتصنيف: "+c.category+"\nالمقاعد: "+c.slots_remaining+"/"+c.slots_total+" متبقية\nالمكافأة: "+c.reward_per_member+" نقطة\nالمطالبات المتحققة: "+claims.rows[0].verified+"\nقيد التحقق: "+claims.rows[0].pending+"\nمرفوضة: "+claims.rows[0].rejected+"\nتاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\nالانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"غير محدد"),Markup.inlineKeyboard(rows));
+});
+bot.action(/^owner:campaign-cancel:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const owned=await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[1],String(ctx.from.id)]);
+    if(!owned.rowCount){await client.query("ROLLBACK");return ctx.reply("الحملة غير موجودة أو لا تملكها.");}
+    const result=await cancelCampaign(client,Number(ctx.match[1]),ctx.from.id,"owner_cancelled");
+    if(!result.cancelled){await client.query("ROLLBACK");return ctx.reply("لا يمكن إلغاء الحملة في حالتها الحالية.");}
+    await client.query("COMMIT");
+    await ctx.reply("⛔ تم إلغاء الحملة وإرجاع "+result.refund+" نقطة غير مستخدمة إلى رصيدك.");
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Owner campaign cancellation failed:",e.message);await ctx.reply("تعذر إلغاء الحملة.");}
+  finally{client.release();}
+});
+bot.action(/^owner:campaign-renew:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const reviewRequired=(await setting("campaign_review_required","false"))==="true";
+    const renewed=await renewCampaign(client,Number(ctx.match[1]),ctx.from.id,reviewRequired?"pending_review":"active");
+    await client.query("COMMIT");
+    await ctx.reply("🔄 تم إنشاء حملة جديدة من الحملة السابقة.\nرقم الحملة الجديدة: #"+renewed.id+"\nالحالة: "+(reviewRequired?"قيد المراجعة":"نشطة"));
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Campaign renewal failed:",e.message);await ctx.reply(e.message==="Insufficient points to fund campaign"?"رصيدك غير كافٍ لتجديد الحملة.":"تعذر تجديد الحملة. تأكد من حفظ القناة والتحقق منها.");
+  }finally{client.release();}
+});
+bot.action(/^owner:campaign-action:(pause|resume):(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const owned=await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[2],String(ctx.from.id)]);
+    if(!owned.rowCount){await client.query("ROLLBACK");return ctx.reply("الحملة غير موجودة أو لا تملكها.");}
+    const result=await changeCampaignStatus(client,Number(ctx.match[2]),ctx.from.id,ctx.match[1]);
+    if(!result.changed){await client.query("ROLLBACK");return ctx.reply("لا يمكن تغيير حالة الحملة حالياً.");}
+    await client.query("COMMIT");
+    await ctx.reply(ctx.match[1]==="pause"?"⏸️ تم إيقاف الحملة مؤقتاً.":"▶️ تم استئناف الحملة.");
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Owner campaign transition failed:",e.message);await ctx.reply("تعذر تحديث الحملة.");}
+  finally{client.release();}
+});
+bot.action("owner:add",async ctx=>{
+  await ctx.answerCbQuery();
+  userState.set(String(ctx.from.id),{type:"channel_add"});
+  await ctx.reply("أرسل معرف القناة العامة مثل @MyChannel. يجب أن تكون مالكاً أو مشرفاً بالقناة، وأن يكون البوت مشرفاً أيضاً. للإلغاء أرسل إلغاء.");
+});
+bot.action(/^owner:use:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT username,title FROM channel_owners WHERE id=$1 AND owner_id=$2 AND verified=TRUE",[ctx.match[1],String(ctx.from.id)]);
+  if(!r.rowCount)return ctx.reply("القناة غير موجودة أو لم تعد موثقة.");
+  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:"@"+r.rows[0].username});
+  await ctx.reply("تم اختيار قناة "+r.rows[0].title+". كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
+});
+bot.action(/^owner:use-latest:(-?\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,username FROM channel_owners WHERE owner_id=$1 AND chat_id=$2 AND verified=TRUE",[String(ctx.from.id),String(ctx.match[1])]);
+  if(!r.rowCount)return ctx.reply("القناة غير محفوظة.");
+  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:"@"+r.rows[0].username});
+  await ctx.reply("كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
 });
 bot.action("campaign_cancel",async ctx=>{userState.delete(String(ctx.from.id));await ctx.answerCbQuery("تم الإلغاء.");return ctx.reply("تم إلغاء العملية.",mainKeyboard());});
 bot.action("home",async ctx=>{await ctx.answerCbQuery();return ctx.reply("القائمة الرئيسية 🚀",mainKeyboard());});
@@ -186,24 +358,47 @@ bot.action(/^adm:/,async ctx=>{
   await ctx.answerCbQuery().catch(()=>{});
   const action=ctx.callbackQuery.data;
   try {
-    if(action==="adm:home") return showAdmin(ctx,true);
+    if(action==="adm:home") {
+      if(isAdmin(ctx))return showAdmin(ctx,true);
+      const staff=await pool.query("SELECT role FROM staff_members WHERE user_id=$1",[String(ctx.from.id)]);
+      const role=staff.rows[0]?.role;
+      const rows=[];
+      if(role==="admin")return showAdmin(ctx,true);
+      if(role==="moderator")rows.push([Markup.button.callback("🚀 إدارة الحملات","adm:campaigns"),Markup.button.callback("👥 المستخدمون","adm:users")]);
+      if(role==="support")rows.push([Markup.button.callback("🎧 تذاكر الدعم","v3:admin_tickets")]);
+      if(role==="analyst")rows.push([Markup.button.callback("📊 التحليلات","adm:stats")]);
+      rows.push([Markup.button.callback("⬅️ الرئيسية","home")]);
+      return ctx.reply("🛡️ لوحة الفريق\nالدور: "+(role||"غير معروف")+"\nاختر الأداة المسموح بها حسب صلاحياتك.",Markup.inlineKeyboard(rows));
+    }
+    if(action==="adm:staff") {adminState.set(String(ctx.from.id),{type:"staff_grant"});return ctx.reply("أرسل أيدي المستخدم والدور بهذا الشكل:\n123456789 support\nالأدوار: admin / moderator / support / analyst");}
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
     if(action==="adm:users") return showAdminUsers(ctx);
-    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل إلغاء للإلغاء.");}
+    if(action==="adm:user_manage") {adminState.set(String(ctx.from.id),{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل إلغاء للإلغاء.");}
     if(action==="adm:settings") return showAdminSettings(ctx);
     if(action==="adm:campaigns") return showAdminCampaigns(ctx);
     if(action==="adm:point_add"||action==="adm:point_sub"||action==="adm:point_check") {
-      adminState.set(adminId,{type:action==="adm:point_add"?"point_add":action==="adm:point_sub"?"point_sub":"point_check",step:"user"});
+      adminState.set(String(ctx.from.id),{type:action==="adm:point_add"?"point_add":action==="adm:point_sub"?"point_sub":"point_check",step:"user"});
       return ctx.reply("أرسل أيدي المستخدم الرقمي"+(action==="adm:point_check"?" لعرض رصيده.":" ثم المبلغ بالنقاط، مثال: 123456789 500."));
     }
-    if(action==="adm:rate") {adminState.set(adminId,{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
+    if(action==="adm:rate") {adminState.set(String(ctx.from.id),{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
+    if(action==="adm:campaign_review") {
+      const current=await setting("campaign_review_required","false");
+      await setSetting("campaign_review_required",current==="true"?"false":"true");
+      return showAdminSettings(ctx);
+    }
+    if(action==="adm:retention") {
+      const current=await setting("retention_verification_enabled","false");
+      await setSetting("retention_verification_enabled",current==="true"?"false":"true");
+      return showAdminSettings(ctx);
+    }
+    if(action==="adm:retention_hours") {adminState.set(String(ctx.from.id),{type:"retention_hours"});return ctx.reply("أرسل مدة التحقق بالساعات من 6 إلى 168. مثال: 24");}
     if(action==="adm:maintenance") {
       const current=await setting("maintenance_mode","false");
       await setSetting("maintenance_mode",current==="true"?"false":"true");
       return showAdminSettings(ctx);
     }
-    if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل إلغاء للإلغاء.");}
+    if(action==="adm:broadcast") {adminState.set(String(ctx.from.id),{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل إلغاء للإلغاء.");}
     const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);
     if(banMatch) {
       const banned=banMatch[1]==="ban", userId=banMatch[2];
@@ -217,24 +412,32 @@ bot.action(/^adm:/,async ctx=>{
       const r=await pool.query("SELECT c.*,u.username,u.first_name FROM campaigns c JOIN users u ON u.telegram_id=c.owner_id WHERE c.id=$1",[Number(match[1])]);
       if(!r.rowCount) return ctx.reply("الحملة غير موجودة.");
       const c=r.rows[0];
-      const kb=c.status==="active"?[[Markup.button.callback("⛔ إلغاء الحملة وإرجاع المتبقي","adm:cancel_campaign:"+c.id)],[Markup.button.callback("⬅️ الحملات","adm:campaigns")]]:[[Markup.button.callback("⬅️ الحملات","adm:campaigns")]];
-      return ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالمالك: "+c.first_name+" ("+c.owner_id+")\nالمتبقي: "+c.slots_remaining+"\nمكافأة العضو: "+c.reward_per_member+"\nالحالة: "+c.status,Markup.inlineKeyboard(kb));
+      const kb=[];
+      if(c.status==="pending_review")kb.push([Markup.button.callback("✅ الموافقة على الحملة","adm:approve_campaign:"+c.id),Markup.button.callback("❌ رفض واسترداد الرصيد","adm:reject_campaign:"+c.id)]);
+      if(["active","paused"].includes(c.status))kb.push([Markup.button.callback("⛔ إلغاء الحملة وإرجاع المتبقي","adm:cancel_campaign:"+c.id)]);
+      kb.push([Markup.button.callback("⬅️ الحملات","adm:campaigns")]);
+      return ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالمالك: "+c.first_name+" ("+c.owner_id+")\nالمتبقي: "+c.slots_remaining+"\nمكافأة العضو: "+c.reward_per_member+"\nالتصنيف: "+c.category+"\nالوصف: "+(c.description||"—")+"\nالانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"غير محدد")+"\nالحالة: "+c.status,Markup.inlineKeyboard(kb));
+    }
+    const review=action.match(/^adm:(approve_campaign|reject_campaign):(\d+)$/);
+    if(review){
+      const client=await pool.connect();
+      try{
+        await client.query("BEGIN");
+        const result=await reviewCampaign(client,Number(review[2]),ctx.from.id,review[1]==="approve_campaign");
+        if(!result.reviewed){await client.query("ROLLBACK");return ctx.reply("الحملة لم تعد بانتظار المراجعة.");}
+        await client.query("COMMIT");
+        return ctx.reply(review[1]==="approve_campaign"?"✅ تمت الموافقة على الحملة وأصبحت نشطة.":"❌ تم رفض الحملة وإرجاع "+result.refund+" نقطة لصاحبها.");
+      }catch(e){await client.query("ROLLBACK").catch(()=>{});throw e;}finally{client.release();}
     }
     const cancel=action.match(/^adm:cancel_campaign:(\d+)$/);
     if(cancel) {
       const client=await pool.connect();
       try {
         await client.query("BEGIN");
-        const r=await client.query("SELECT * FROM campaigns WHERE id=$1 FOR UPDATE",[Number(cancel[1])]);
-        if(!r.rowCount||r.rows[0].status!=="active"){await client.query("ROLLBACK");return ctx.reply("الحملة غير نشطة أو غير موجودة.");}
-        const c=r.rows[0],refund=BigInt(c.slots_remaining)*BigInt(c.reward_per_member);
-        if(refund>0n) {
-          await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[refund.toString(),String(c.owner_id)]);
-          await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_refund',$3)",[String(c.owner_id),refund.toString(),c.id]);
-        }
-        await client.query("UPDATE campaigns SET status='cancelled',slots_remaining=0 WHERE id=$1",[c.id]);
+        const result=await cancelCampaign(client,Number(cancel[1]),adminId,"admin_cancelled");
+        if(!result.cancelled){await client.query("ROLLBACK");return ctx.reply(result.reason==="not_found"?"الحملة غير موجودة.":"الحملة غير نشطة أو لا يمكن إلغاؤها.");}
         await client.query("COMMIT");
-        await ctx.reply("تم إلغاء الحملة #"+c.id+" وإرجاع "+refund+" نقطة إلى صاحبها.");
+        await ctx.reply("تم إلغاء الحملة #"+cancel[1]+" وإرجاع "+result.refund+" نقطة إلى صاحبها.");
       }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
       return showAdminCampaigns(ctx);
     }
@@ -243,11 +446,24 @@ bot.action(/^adm:/,async ctx=>{
 
 bot.on("text",async ctx=>{
   if (await bot.handleText?.(ctx)) return;
-  if(!isAdmin(ctx)) {
+  if(!isAdmin(ctx) && !adminState.has(String(ctx.from.id))) {
     const state=userState.get(String(ctx.from.id));
     if(!state) return;
     const input=(ctx.message.text||"").trim();
     if(input==="إلغاء"){userState.delete(String(ctx.from.id));return ctx.reply("تم إلغاء العملية.",mainKeyboard());}
+    if(state.type==="channel_add"){
+      if(!/^@[A-Za-z0-9_]{5,32}$/.test(input))return ctx.reply("معرف القناة غير صحيح. أرسله بصيغة @ChannelName.");
+      try{
+        const chat=await bot.telegram.getChat(input);
+        if(chat.type!=="channel")return ctx.reply("هذا المعرف لا يعود إلى قناة Telegram.");
+        const me=await bot.telegram.getMe();
+        if(!(await isChannelAdmin(input,me.id)))return ctx.reply("يجب إضافة البوت مشرفاً بالقناة أولاً.");
+        if(!(await isChannelAdmin(input,ctx.from.id)))return ctx.reply("يجب أن تكون مالكاً أو مشرفاً بالقناة حتى تحفظها.");
+        await pool.query("INSERT INTO channel_owners(owner_id,chat_id,username,title,verified,verified_at) VALUES($1,$2,$3,$4,TRUE,NOW()) ON CONFLICT(owner_id,chat_id) DO UPDATE SET username=EXCLUDED.username,title=EXCLUDED.title,verified=TRUE,verified_at=NOW()",[String(ctx.from.id),String(chat.id),chat.username||input.replace(/^@/,""),chat.title||input]);
+        userState.delete(String(ctx.from.id));
+        return ctx.reply("✅ تم حفظ القناة والتحقق من صلاحياتك: "+(chat.title||input),Markup.inlineKeyboard([[Markup.button.callback("➕ إنشاء حملة بهذه القناة","owner:use-latest:"+chat.id)],[Markup.button.callback("📡 قنواتي","owner:channels")]]));
+      }catch(e){console.error("Channel verification failed:",e.description||e.message);return ctx.reply("تعذر التحقق من القناة. تأكد من المعرف وصلاحيات البوت.");}
+    }
     if(state.type==="campaign_channel"){
       if(!/^@[A-Za-z0-9_]{5,32}$/.test(input)) return ctx.reply("معرف القناة غير صحيح. أرسله بصيغة @ChannelName.");
       state.channel=input;state.type="campaign_slots";userState.set(String(ctx.from.id),state);
@@ -261,40 +477,53 @@ bot.on("text",async ctx=>{
         if(chat.type!=="channel") return ctx.reply("المعرف لا يعود إلى قناة عامة.",mainKeyboard());
         const me=await bot.telegram.getMe();
         if(!(await isChannelAdmin(channel,me.id))) return ctx.reply("أضف البوت مشرفاً بالقناة أولاً ثم أعد المحاولة.",mainKeyboard());
+        if(!(await isChannelAdmin(channel,ctx.from.id))) return ctx.reply("يجب أن تكون مالكاً أو مشرفاً بالقناة لإنشاء حملة لها.",mainKeyboard());
+        await pool.query("INSERT INTO channel_owners(owner_id,chat_id,username,title,verified,verified_at) VALUES($1,$2,$3,$4,TRUE,NOW()) ON CONFLICT(owner_id,chat_id) DO UPDATE SET username=EXCLUDED.username,title=EXCLUDED.title,verified=TRUE,verified_at=NOW()",[String(ctx.from.id),String(chat.id),chat.username||channel.replace(/^@/,""),chat.title||channel]);
         const rate=await pointsPerMember(),cost=BigInt(slots)*BigInt(rate);client=await pool.connect();await client.query("BEGIN");
-        const u=await client.query("SELECT points,is_banned FROM users WHERE telegram_id=$1 FOR UPDATE",[String(ctx.from.id)]);
-        if(!u.rowCount||u.rows[0].is_banned){await client.query("ROLLBACK");return ctx.reply("حسابك غير متاح لإنشاء الحملات.",mainKeyboard());}
-        if(BigInt(u.rows[0].points)<cost){await client.query("ROLLBACK");return ctx.reply("رصيدك غير كافٍ. تحتاج "+cost+" نقطة، ورصيدك "+u.rows[0].points+".",mainKeyboard());}
-        await client.query("UPDATE users SET points=points-$1,updated_at=NOW() WHERE telegram_id=$2",[cost.toString(),String(ctx.from.id)]);
-        const campaign=await client.query("INSERT INTO campaigns(owner_id,channel_username,channel_title,slots_total,slots_remaining,reward_per_member) VALUES($1,$2,$3,$4,$4,$5) RETURNING id",[String(ctx.from.id),channel,chat.title||channel,slots,rate]);
-        await client.query("INSERT INTO points_ledger(user_id,amount,reason,reference_id) VALUES($1,$2,'campaign_funding',$3)",[String(ctx.from.id),(-cost).toString(),campaign.rows[0].id]);await client.query("COMMIT");
-        return ctx.reply("تم إنشاء حملتك بنجاح 🚀\nالقناة: "+channel+"\nعدد المقاعد: "+slots+"\nالنقاط المحجوزة: "+cost,mainKeyboard());
+        const reviewRequired=(await setting("campaign_review_required","false"))==="true";
+        const campaign=await createCampaign(client,{ownerId:ctx.from.id,channelUsername:channel,channelTitle:chat.title||channel,slots,rewardPerMember:rate,initialStatus:reviewRequired?"pending_review":"active"});
+        await client.query("COMMIT");
+        return ctx.reply("تم إنشاء حملتك 🚀\nرقم الحملة: #"+campaign.id+"\nالقناة: "+channel+"\nعدد المقاعد: "+slots+"\nالنقاط المحجوزة: "+cost+"\nالحالة: "+(reviewRequired?"قيد مراجعة الإدارة":"نشطة"),mainKeyboard());
       }catch(e){if(client)await client.query("ROLLBACK").catch(()=>{});console.error("Campaign wizard failed:",e.message);return ctx.reply("تعذر إنشاء الحملة. تحقق من القناة وصلاحيات البوت ثم حاول مجدداً.",mainKeyboard());}
       finally{if(client)client.release();}
     }
     return;
   }
-  const state=adminState.get(adminId);
+  const actorId=String(ctx.from.id);
+  const state=adminState.get(actorId)||adminState.get(adminId);
   if(!state) return;
   const input=(ctx.message.text||"").trim();
-  if(input==="إلغاء"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
+  if(input==="إلغاء"){adminState.delete(actorId);adminState.delete(actorId);return ctx.reply("تم إلغاء العملية.");}
   try {
     if(state.type==="user_manage") {
       if(!/^\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");
       const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned,created_at FROM users WHERE telegram_id=$1",[input]);
       if(!r.rowCount) return ctx.reply("المستخدم غير مسجل في البوت.");
-      const u=r.rows[0];adminState.delete(adminId);
+      const u=r.rows[0];adminState.delete(actorId);
       const action=u.is_banned?"unban":"ban";
       return ctx.reply("👤 المستخدم: "+(u.first_name||"—")+"\nالأيدي: "+u.telegram_id+"\nالمعرف: "+(u.username?"@"+u.username:"—")+"\nالرصيد: "+u.points+" نقطة\nالحالة: "+(u.is_banned?"محظور":"نشط"),Markup.inlineKeyboard([[Markup.button.callback(u.is_banned?"🟢 إلغاء الحظر":"🚫 حظر المستخدم","adm:"+action+":"+u.telegram_id)],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ المستخدمون","adm:users")]]));
     }
     if(state.type==="rate") {
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
-      await setSetting("points_per_member",input);adminState.delete(adminId);
+      await setSetting("points_per_member",input);adminState.delete(actorId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");
+    }
+    if(state.type==="staff_grant") {
+      const parts=input.split(/\\s+/);
+      if(!/^\d+$/.test(parts[0]||"")||parts.length!==2||!["admin","moderator","support","analyst"].includes(parts[1]))return ctx.reply("الصيغة غير صحيحة. مثال: 123456789 support");
+      await grantStaffRole(pool,ctx.from.id,parts[0],parts[1],adminId);
+      adminState.delete(actorId);
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'staff_role_grant',$2,$3::jsonb)",[actorId,parts[0],JSON.stringify({role:parts[1]})]);
+      return ctx.reply("تم منح الدور "+parts[1]+" للمستخدم "+parts[0]+".");
+    }
+    if(state.type==="retention_hours") {
+      if(!/^\d+$/.test(input)||Number(input)<6||Number(input)>168) return ctx.reply("مدة التحقق يجب أن تكون بين 6 و168 ساعة.");
+      await setSetting("retention_hours",input);adminState.delete(actorId);
+      return ctx.reply("تم تحديث مدة التحقق إلى "+input+" ساعة. تطبق على المطالبات الجديدة فقط.");
     }
     if(state.type==="broadcast") {
       if(!input||input.length>4000) return ctx.reply("الرسالة فارغة أو أطول من الحد المسموح.");
-      adminState.delete(adminId);
+      adminState.delete(actorId);
       const users=await pool.query("SELECT telegram_id FROM users WHERE is_banned=FALSE");
       let sent=0,failed=0;
       for(const u of users.rows){try{await bot.telegram.sendMessage(String(u.telegram_id),input);sent++;}catch{failed++;}}
@@ -306,9 +535,9 @@ bot.on("text",async ctx=>{
         if(!/^\d+$/.test(parts[0])) return ctx.reply("أرسل أيدي تيليجرام الرقمي فقط.");
         const user=await pool.query("SELECT telegram_id,points,first_name FROM users WHERE telegram_id=$1",[parts[0]]);
         if(!user.rowCount) return ctx.reply("هذا المستخدم غير مسجل في البوت.");
-        if(state.type==="point_check") {adminState.delete(adminId);return ctx.reply("المستخدم: "+(user.rows[0].first_name||"—")+"\nالأيدي: "+parts[0]+"\nالرصيد: "+user.rows[0].points+" نقطة.");}
+        if(state.type==="point_check") {adminState.delete(actorId);return ctx.reply("المستخدم: "+(user.rows[0].first_name||"—")+"\nالأيدي: "+parts[0]+"\nالرصيد: "+user.rows[0].points+" نقطة.");}
         if(parts.length===2&&/^\d+$/.test(parts[1])) state.amount=parts[1];
-        else {state.userId=parts[0];state.step="amount";adminState.set(adminId,state);return ctx.reply("تم تحديد المستخدم. أرسل عدد النقاط الآن.");}
+        else {state.userId=parts[0];state.step="amount";adminState.set(String(ctx.from.id),state);return ctx.reply("تم تحديد المستخدم. أرسل عدد النقاط الآن.");}
         state.userId=parts[0];
       } else if(state.step==="amount") {
         if(!/^\d+$/.test(input)) return ctx.reply("أرسل مبلغاً رقمياً صحيحاً.");
@@ -320,28 +549,30 @@ bot.on("text",async ctx=>{
       try {
         await client.query("BEGIN");
         const u=await client.query("SELECT points FROM users WHERE telegram_id=$1 FOR UPDATE",[state.userId]);
-        if(!u.rowCount) {await client.query("ROLLBACK");adminState.delete(adminId);return ctx.reply("المستخدم غير موجود.");}
+        if(!u.rowCount) {await client.query("ROLLBACK");adminState.delete(actorId);return ctx.reply("المستخدم غير موجود.");}
         if(state.type==="point_sub"&&BigInt(u.rows[0].points)<amount){await client.query("ROLLBACK");return ctx.reply("رصيد المستخدم أقل من المبلغ المطلوب خصمه.");}
         const delta=state.type==="point_add"?amount:-amount;
         await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[delta.toString(),state.userId]);
         await client.query("INSERT INTO points_ledger(user_id,amount,reason) VALUES($1,$2,$3)",[state.userId,delta.toString(),state.type==="point_add"?"admin_credit":"admin_debit"]);
         await client.query("COMMIT");
-        adminState.delete(adminId);
+        adminState.delete(actorId);
         return ctx.reply((state.type==="point_add"?"تمت إضافة ":"تم خصم ")+amount+" نقطة للمستخدم "+state.userId+".");
       }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
     }
-  }catch(e){console.error("Admin text action failed:",e.message);adminState.delete(adminId);await ctx.reply("تعذر تنفيذ العملية. حاول مرة ثانية.");}
+  }catch(e){console.error("Admin text action failed:",e.message);adminState.delete(actorId);await ctx.reply("تعذر تنفيذ العملية. حاول مرة ثانية.");}
 });
 bot.catch(e=>console.error("Telegram update error:",e));
 async function main(){
   await initializeDatabase();
   await migrateV3(pool);
+  await migrateV4(pool,adminId);
   installV3(bot,pool,adminId);
-  console.log("PostgreSQL connected; SubRocket schema is ready.");
+  startPlatformWorkers(pool,bot,rewardReferral);
+  console.log("PostgreSQL connected; SubRocket v0.0.4 schema and workers are ready.");
   await bot.launch();
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"}],{scope:{type:"default"}});
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"},{command:"adminadmin",description:"لوحة تحكم المدير"}],{scope:{type:"chat",chat_id:Number(adminId)}});
-  console.log("SubRocket v0.0.2 is running with button-first menus and scoped commands.");
+  console.log("SubRocket v0.0.4 platform foundation is running; legacy data preserved.");
 }
 main().catch(e=>{console.error("Startup failed:",e);process.exit(1);});
 process.once("SIGINT",()=>bot.stop("SIGINT"));

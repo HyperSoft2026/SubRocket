@@ -39,6 +39,28 @@ async function cancelCampaign(client, campaignId, actorId, reason = "cancelled")
   return { cancelled: true, refund: refund.toString(), ownerId: String(campaign.owner_id) };
 }
 
+async function renewCampaign(client, oldCampaignId, ownerId, initialStatus = "active") {
+  const found = await client.query("SELECT * FROM campaigns WHERE id=$1 AND owner_id=$2", [Number(oldCampaignId), String(ownerId)]);
+  if (!found.rowCount) throw new Error("Campaign not found or not owned by user");
+  const old = found.rows[0];
+  const channel = await client.query("SELECT 1 FROM channel_owners WHERE owner_id=$1 AND username=REPLACE($2,'@','') AND verified=TRUE", [String(ownerId), old.channel_username]);
+  if (!channel.rowCount) throw new Error("The channel is not saved and verified for this owner");
+  const renewed = await createCampaign(client, {
+    ownerId,
+    channelUsername: old.channel_username,
+    channelTitle: old.channel_title,
+    slots: old.slots_total,
+    rewardPerMember: old.reward_per_member,
+    category: old.category,
+    description: old.description,
+    imageUrl: old.image_url,
+    expiresAt: null,
+    initialStatus
+  });
+  await recordCampaignEvent(client, renewed.id, ownerId, "renewed_from", { sourceCampaignId: old.id });
+  return renewed;
+}
+
 async function changeCampaignStatus(client, campaignId, actorId, action) {
   const transitions = {
     pause: { from: ["active"], to: "paused" },
@@ -92,4 +114,4 @@ async function updateCampaignDetails(client, campaignId, ownerId, patch) {
   return true;
 }
 
-module.exports = { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign, updateCampaignDetails };
+module.exports = { createCampaign, cancelCampaign, changeCampaignStatus, reviewCampaign, renewCampaign, updateCampaignDetails };

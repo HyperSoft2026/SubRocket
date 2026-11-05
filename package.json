@@ -1,8 +1,8 @@
 {
   "name": "subrocket",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
-  "description": "منصة تيليجرام لإدارة حملات الاشتراك والنقاط والمكافآت والإحالات",
+  "description": "منصة حملات ومكافآت وتسويق مجتمعي على Telegram",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

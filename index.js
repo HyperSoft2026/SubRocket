@@ -15,41 +15,18 @@ const adminState = new Map();
 const DEFAULT_POINTS_PER_MEMBER = Math.max(1, Number.parseInt(process.env.POINTS_PER_MEMBER || "100", 10));
 
 async function initializeDatabase() {
-  await pool.query(\`
-    CREATE TABLE IF NOT EXISTS users (
-      telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT,
-      points BIGINT NOT NULL DEFAULT 0 CHECK (points >= 0),
-      is_banned BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
-    CREATE TABLE IF NOT EXISTS campaigns (
-      id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES users(telegram_id),
-      channel_username TEXT NOT NULL, channel_title TEXT,
-      slots_total INTEGER NOT NULL CHECK (slots_total > 0),
-      slots_remaining INTEGER NOT NULL CHECK (slots_remaining >= 0),
-      reward_per_member INTEGER NOT NULL CHECK (reward_per_member > 0),
-      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','cancelled')),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS campaign_claims (
-      id BIGSERIAL PRIMARY KEY, campaign_id BIGINT NOT NULL REFERENCES campaigns(id),
-      user_id BIGINT NOT NULL REFERENCES users(telegram_id), reward INTEGER NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (campaign_id,user_id)
-    );
-    CREATE TABLE IF NOT EXISTS points_ledger (
-      id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id),
-      amount BIGINT NOT NULL, reason TEXT NOT NULL, reference_id BIGINT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS bot_settings (
-      key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS campaigns_active_idx ON campaigns(status,created_at DESC);
-    CREATE INDEX IF NOT EXISTS points_ledger_user_idx ON points_ledger(user_id,created_at DESC);
-    INSERT INTO bot_settings(key,value) VALUES ('points_per_member',$1),('maintenance_mode','false')
-      ON CONFLICT (key) DO NOTHING;
-  \`, [String(DEFAULT_POINTS_PER_MEMBER)]);
+  const statements = [
+    "CREATE TABLE IF NOT EXISTS users (telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, points BIGINT NOT NULL DEFAULT 0 CHECK (points >= 0), is_banned BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE",
+    "CREATE TABLE IF NOT EXISTS campaigns (id BIGSERIAL PRIMARY KEY, owner_id BIGINT NOT NULL REFERENCES users(telegram_id), channel_username TEXT NOT NULL, channel_title TEXT, slots_total INTEGER NOT NULL CHECK (slots_total > 0), slots_remaining INTEGER NOT NULL CHECK (slots_remaining >= 0), reward_per_member INTEGER NOT NULL CHECK (reward_per_member > 0), status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','cancelled')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS campaign_claims (id BIGSERIAL PRIMARY KEY, campaign_id BIGINT NOT NULL REFERENCES campaigns(id), user_id BIGINT NOT NULL REFERENCES users(telegram_id), reward INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (campaign_id,user_id))",
+    "CREATE TABLE IF NOT EXISTS points_ledger (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(telegram_id), amount BIGINT NOT NULL, reason TEXT NOT NULL, reference_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE INDEX IF NOT EXISTS campaigns_active_idx ON campaigns(status,created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS points_ledger_user_idx ON points_ledger(user_id,created_at DESC)"
+  ];
+  for (const statement of statements) await pool.query(statement);
+  await pool.query("INSERT INTO bot_settings(key,value) VALUES ('points_per_member',$1),('maintenance_mode','false') ON CONFLICT(key) DO NOTHING", [String(DEFAULT_POINTS_PER_MEMBER)]);
 }
 async function setting(key, fallback) {
   const r = await pool.query("SELECT value FROM bot_settings WHERE key=$1", [key]);
@@ -100,13 +77,13 @@ async function showAdmin(ctx, edit=false) {
   return ctx.reply(text,{parse_mode:"Markdown",...adminKeyboard()});
 }
 async function showAdminStats(ctx) {
-  const r = await pool.query(\`SELECT
+  const r = await pool.query(`SELECT
     (SELECT COUNT(*)::int FROM users) users,
     (SELECT COUNT(*)::int FROM users WHERE is_banned) banned,
     (SELECT COALESCE(SUM(points),0)::text FROM users) points,
     (SELECT COUNT(*)::int FROM campaigns) campaigns,
     (SELECT COUNT(*)::int FROM campaigns WHERE status='active') active,
-    (SELECT COUNT(*)::int FROM campaign_claims) claims\`);
+    (SELECT COUNT(*)::int FROM campaign_claims) claims`);
   const s=r.rows[0];
   await ctx.editMessageText("📊 **إحصائيات SubRocket**\n\n👥 المستخدمون: "+s.users+"\n🚫 المحظورون: "+s.banned+"\n⭐ مجموع الأرصدة: "+s.points+"\n🚀 كل الحملات: "+s.campaigns+"\n🟢 الحملات النشطة: "+s.active+"\n✅ الاشتراكات المتحققة: "+s.claims,{parse_mode:"Markdown",...Markup.inlineKeyboard([[Markup.button.callback("⬅️ رجوع","adm:home")]])});
 }
@@ -242,7 +219,15 @@ bot.action(/^adm:/,async ctx=>{
       return showAdminSettings(ctx);
     }
     if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل /cancel للإلغاء.");}
-    const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);\n    if(banMatch) {\n      const banned=banMatch[1]==="ban", userId=banMatch[2];\n      if(userId===adminId) return ctx.reply("لا يمكن حظر حساب المدير.");\n      const result=await pool.query("UPDATE users SET is_banned=$1,updated_at=NOW() WHERE telegram_id=$2 RETURNING first_name,points",[banned,userId]);\n      if(!result.rowCount) return ctx.reply("المستخدم غير موجود.");\n      return ctx.reply((banned?"تم إيقاف":"تم تفعيل")+" حساب "+userId+".");\n    }\n    const match=action.match(/^adm:campaign:(\d+)$/);
+    const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);
+    if(banMatch) {
+      const banned=banMatch[1]==="ban", userId=banMatch[2];
+      if(userId===adminId) return ctx.reply("لا يمكن حظر حساب المدير.");
+      const result=await pool.query("UPDATE users SET is_banned=$1,updated_at=NOW() WHERE telegram_id=$2 RETURNING first_name,points",[banned,userId]);
+      if(!result.rowCount) return ctx.reply("المستخدم غير موجود.");
+      return ctx.reply((banned?"تم إيقاف":"تم تفعيل")+" حساب "+userId+".");
+    }
+    const match=action.match(/^adm:campaign:(\d+)$/);
     if(match) {
       const r=await pool.query("SELECT c.*,u.username,u.first_name FROM campaigns c JOIN users u ON u.telegram_id=c.owner_id WHERE c.id=$1",[Number(match[1])]);
       if(!r.rowCount) return ctx.reply("الحملة غير موجودة.");

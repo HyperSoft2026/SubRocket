@@ -210,15 +210,14 @@ bot.action("owner:add",async ctx=>{
   userState.set(String(ctx.from.id),{type:"channel_add"});
   await ctx.reply("أرسل معرف القناة العامة مثل @MyChannel. يجب أن تكون مالكاً أو مشرفاً بالقناة، وأن يكون البوت مشرفاً أيضاً. للإلغاء أرسل إلغاء.");
 });
-bot.action(/^owner:use:(\\d+)$/,async ctx=>{
+bot.action(/^owner:use:(\d+)$/,async ctx=>{
   await ctx.answerCbQuery();
   const r=await pool.query("SELECT username,title FROM channel_owners WHERE id=$1 AND owner_id=$2 AND verified=TRUE",[ctx.match[1],String(ctx.from.id)]);
   if(!r.rowCount)return ctx.reply("القناة غير موجودة أو لم تعد موثقة.");
   userState.set(String(ctx.from.id),{type:"campaign_slots",channel:r.rows[0].username});
   await ctx.reply("تم اختيار قناة "+r.rows[0].title+". كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
 });
-bot.action("owner:use-latest",async ctx=>{await ctx.answerCbQuery();});
-bot.action(/^owner:use-latest:(-?\\d+)$/,async ctx=>{
+bot.action(/^owner:use-latest:(-?\d+)$/,async ctx=>{
   await ctx.answerCbQuery();
   const r=await pool.query("SELECT id,username FROM channel_owners WHERE owner_id=$1 AND chat_id=$2 AND verified=TRUE",[String(ctx.from.id),String(ctx.match[1])]);
   if(!r.rowCount)return ctx.reply("القناة غير محفوظة.");

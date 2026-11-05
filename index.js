@@ -346,14 +346,14 @@ bot.action(/^adm:/,async ctx=>{
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
     if(action==="adm:users") return showAdminUsers(ctx);
-    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل إلغاء للإلغاء.");}
+    if(action==="adm:user_manage") {adminState.set(String(ctx.from.id),{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل إلغاء للإلغاء.");}
     if(action==="adm:settings") return showAdminSettings(ctx);
     if(action==="adm:campaigns") return showAdminCampaigns(ctx);
     if(action==="adm:point_add"||action==="adm:point_sub"||action==="adm:point_check") {
-      adminState.set(adminId,{type:action==="adm:point_add"?"point_add":action==="adm:point_sub"?"point_sub":"point_check",step:"user"});
+      adminState.set(String(ctx.from.id),{type:action==="adm:point_add"?"point_add":action==="adm:point_sub"?"point_sub":"point_check",step:"user"});
       return ctx.reply("أرسل أيدي المستخدم الرقمي"+(action==="adm:point_check"?" لعرض رصيده.":" ثم المبلغ بالنقاط، مثال: 123456789 500."));
     }
-    if(action==="adm:rate") {adminState.set(adminId,{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
+    if(action==="adm:rate") {adminState.set(String(ctx.from.id),{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
     if(action==="adm:campaign_review") {
       const current=await setting("campaign_review_required","false");
       await setSetting("campaign_review_required",current==="true"?"false":"true");
@@ -364,13 +364,13 @@ bot.action(/^adm:/,async ctx=>{
       await setSetting("retention_verification_enabled",current==="true"?"false":"true");
       return showAdminSettings(ctx);
     }
-    if(action==="adm:retention_hours") {adminState.set(adminId,{type:"retention_hours"});return ctx.reply("أرسل مدة التحقق بالساعات من 6 إلى 168. مثال: 24");}
+    if(action==="adm:retention_hours") {adminState.set(String(ctx.from.id),{type:"retention_hours"});return ctx.reply("أرسل مدة التحقق بالساعات من 6 إلى 168. مثال: 24");}
     if(action==="adm:maintenance") {
       const current=await setting("maintenance_mode","false");
       await setSetting("maintenance_mode",current==="true"?"false":"true");
       return showAdminSettings(ctx);
     }
-    if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل إلغاء للإلغاء.");}
+    if(action==="adm:broadcast") {adminState.set(String(ctx.from.id),{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل إلغاء للإلغاء.");}
     const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);
     if(banMatch) {
       const banned=banMatch[1]==="ban", userId=banMatch[2];
@@ -465,19 +465,19 @@ bot.on("text",async ctx=>{
   const state=adminState.get(actorId)||adminState.get(adminId);
   if(!state) return;
   const input=(ctx.message.text||"").trim();
-  if(input==="إلغاء"){adminState.delete(actorId);adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
+  if(input==="إلغاء"){adminState.delete(actorId);adminState.delete(actorId);return ctx.reply("تم إلغاء العملية.");}
   try {
     if(state.type==="user_manage") {
       if(!/^\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");
       const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned,created_at FROM users WHERE telegram_id=$1",[input]);
       if(!r.rowCount) return ctx.reply("المستخدم غير مسجل في البوت.");
-      const u=r.rows[0];adminState.delete(adminId);
+      const u=r.rows[0];adminState.delete(actorId);
       const action=u.is_banned?"unban":"ban";
       return ctx.reply("👤 المستخدم: "+(u.first_name||"—")+"\nالأيدي: "+u.telegram_id+"\nالمعرف: "+(u.username?"@"+u.username:"—")+"\nالرصيد: "+u.points+" نقطة\nالحالة: "+(u.is_banned?"محظور":"نشط"),Markup.inlineKeyboard([[Markup.button.callback(u.is_banned?"🟢 إلغاء الحظر":"🚫 حظر المستخدم","adm:"+action+":"+u.telegram_id)],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ المستخدمون","adm:users")]]));
     }
     if(state.type==="rate") {
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
-      await setSetting("points_per_member",input);adminState.delete(adminId);
+      await setSetting("points_per_member",input);adminState.delete(actorId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");
     }
     if(state.type==="staff_grant") {
@@ -490,12 +490,12 @@ bot.on("text",async ctx=>{
     }
     if(state.type==="retention_hours") {
       if(!/^\d+$/.test(input)||Number(input)<6||Number(input)>168) return ctx.reply("مدة التحقق يجب أن تكون بين 6 و168 ساعة.");
-      await setSetting("retention_hours",input);adminState.delete(adminId);
+      await setSetting("retention_hours",input);adminState.delete(actorId);
       return ctx.reply("تم تحديث مدة التحقق إلى "+input+" ساعة. تطبق على المطالبات الجديدة فقط.");
     }
     if(state.type==="broadcast") {
       if(!input||input.length>4000) return ctx.reply("الرسالة فارغة أو أطول من الحد المسموح.");
-      adminState.delete(adminId);
+      adminState.delete(actorId);
       const users=await pool.query("SELECT telegram_id FROM users WHERE is_banned=FALSE");
       let sent=0,failed=0;
       for(const u of users.rows){try{await bot.telegram.sendMessage(String(u.telegram_id),input);sent++;}catch{failed++;}}
@@ -507,9 +507,9 @@ bot.on("text",async ctx=>{
         if(!/^\d+$/.test(parts[0])) return ctx.reply("أرسل أيدي تيليجرام الرقمي فقط.");
         const user=await pool.query("SELECT telegram_id,points,first_name FROM users WHERE telegram_id=$1",[parts[0]]);
         if(!user.rowCount) return ctx.reply("هذا المستخدم غير مسجل في البوت.");
-        if(state.type==="point_check") {adminState.delete(adminId);return ctx.reply("المستخدم: "+(user.rows[0].first_name||"—")+"\nالأيدي: "+parts[0]+"\nالرصيد: "+user.rows[0].points+" نقطة.");}
+        if(state.type==="point_check") {adminState.delete(actorId);return ctx.reply("المستخدم: "+(user.rows[0].first_name||"—")+"\nالأيدي: "+parts[0]+"\nالرصيد: "+user.rows[0].points+" نقطة.");}
         if(parts.length===2&&/^\d+$/.test(parts[1])) state.amount=parts[1];
-        else {state.userId=parts[0];state.step="amount";adminState.set(adminId,state);return ctx.reply("تم تحديد المستخدم. أرسل عدد النقاط الآن.");}
+        else {state.userId=parts[0];state.step="amount";adminState.set(String(ctx.from.id),state);return ctx.reply("تم تحديد المستخدم. أرسل عدد النقاط الآن.");}
         state.userId=parts[0];
       } else if(state.step==="amount") {
         if(!/^\d+$/.test(input)) return ctx.reply("أرسل مبلغاً رقمياً صحيحاً.");
@@ -521,17 +521,17 @@ bot.on("text",async ctx=>{
       try {
         await client.query("BEGIN");
         const u=await client.query("SELECT points FROM users WHERE telegram_id=$1 FOR UPDATE",[state.userId]);
-        if(!u.rowCount) {await client.query("ROLLBACK");adminState.delete(adminId);return ctx.reply("المستخدم غير موجود.");}
+        if(!u.rowCount) {await client.query("ROLLBACK");adminState.delete(actorId);return ctx.reply("المستخدم غير موجود.");}
         if(state.type==="point_sub"&&BigInt(u.rows[0].points)<amount){await client.query("ROLLBACK");return ctx.reply("رصيد المستخدم أقل من المبلغ المطلوب خصمه.");}
         const delta=state.type==="point_add"?amount:-amount;
         await client.query("UPDATE users SET points=points+$1,updated_at=NOW() WHERE telegram_id=$2",[delta.toString(),state.userId]);
         await client.query("INSERT INTO points_ledger(user_id,amount,reason) VALUES($1,$2,$3)",[state.userId,delta.toString(),state.type==="point_add"?"admin_credit":"admin_debit"]);
         await client.query("COMMIT");
-        adminState.delete(adminId);
+        adminState.delete(actorId);
         return ctx.reply((state.type==="point_add"?"تمت إضافة ":"تم خصم ")+amount+" نقطة للمستخدم "+state.userId+".");
       }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
     }
-  }catch(e){console.error("Admin text action failed:",e.message);adminState.delete(adminId);await ctx.reply("تعذر تنفيذ العملية. حاول مرة ثانية.");}
+  }catch(e){console.error("Admin text action failed:",e.message);adminState.delete(actorId);await ctx.reply("تعذر تنفيذ العملية. حاول مرة ثانية.");}
 });
 bot.catch(e=>console.error("Telegram update error:",e));
 async function main(){

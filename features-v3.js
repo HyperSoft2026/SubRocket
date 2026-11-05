@@ -96,6 +96,7 @@ async function notifications(ctx,pool) {
 }
 async function handleText(ctx,pool,adminId,bot) {
   const id=String(ctx.from.id),input=(ctx.message.text||"").trim();
+  const state=adminStates.get(id);
   if(id===String(adminId)&&adminStates.has(id)){
     if(input==="إلغاء"){adminStates.delete(id);await ctx.reply("تم الإلغاء.");return true;}
     if(state.type==="support_reply"){
@@ -134,7 +135,9 @@ async function handleText(ctx,pool,adminId,bot) {
   if(state==="support"){
     if(input.length<5||input.length>3000){await ctx.reply("اكتب تفاصيل من 5 إلى 3000 حرف.");return true;}
     const r=await pool.query("INSERT INTO support_tickets(user_id,message) VALUES($1,$2) RETURNING id",[id,input]);
-    userStates.delete(id);await ctx.reply("🎧 استلمنا تذكرتك رقم #"+r.rows[0].id+".");return true;
+    userStates.delete(id);
+    await bot.telegram.sendMessage(String(adminId),"🎧 تذكرة دعم جديدة #"+r.rows[0].id+"\nمن المستخدم: "+id+"\n\n"+input,Markup.inlineKeyboard([[Markup.button.callback("فتح التذكرة","v3:ticket:"+r.rows[0].id)],[Markup.button.callback("كل التذاكر","v3:admin_tickets")]])).catch(e=>console.error("Support notification failed:",e.message));
+    await ctx.reply("🎧 استلمنا تذكرتك رقم #"+r.rows[0].id+".");return true;
   }
   return false;
 }

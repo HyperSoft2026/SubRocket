@@ -226,7 +226,7 @@ function installV3(bot,pool,adminId){
     await c.reply("🎧 تذاكر الدعم المفتوحة ("+r.rowCount+")",Markup.inlineKeyboard(rows));
   });
   bot.action(/^v3:ticket:(\d+)$/,async c=>{
-    if(!(await hasPermission(pool,c.from.id,"support.reply",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}
+    if(!(await hasPermission(pool,c.from.id,"support.read",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}
     await c.answerCbQuery();
     const r=await pool.query("SELECT * FROM support_tickets WHERE id=$1",[c.match[1]]);
     if(!r.rowCount){await c.reply("التذكرة غير موجودة.");return;}
@@ -240,7 +240,7 @@ function installV3(bot,pool,adminId){
     ]));
   });
   bot.action(/^v3:ticket_reply:(\d+)$/,async c=>{
-    if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
+    if(!(await hasPermission(pool,c.from.id,"support.reply",adminId))){await c.answerCbQuery("غير مصرح لك.",{show_alert:true}).catch(()=>{});return;}
     await c.answerCbQuery();
     const ticket=await pool.query("SELECT status FROM support_tickets WHERE id=$1",[c.match[1]]);
     if(!ticket.rowCount||ticket.rows[0].status==="closed"){await c.reply("هذه التذكرة مغلقة أو غير موجودة.");return;}
@@ -253,7 +253,7 @@ function installV3(bot,pool,adminId){
     const r=await pool.query("UPDATE support_tickets SET status='closed',updated_at=NOW() WHERE id=$1 AND status<>'closed' RETURNING user_id",[c.match[1]]);
     if(r.rowCount){
       const userId=String(r.rows[0].user_id);
-      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_close',$2,$3::jsonb)",[adminId,Number(c.match[1]),JSON.stringify({user_id:userId})]);
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_close',$2,$3::jsonb)",[String(c.from.id),Number(c.match[1]),JSON.stringify({user_id:userId})]);
       await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[userId,"تم إغلاق تذكرتك #"+c.match[1],"تم إغلاق طلب الدعم الخاص بك من فريق الدعم الفني."]);
       try{await bot.telegram.sendMessage(userId,"🔒 تم إغلاق تذكرة الدعم #"+c.match[1]+". إذا احتجت مساعدة جديدة يمكنك فتح تذكرة أخرى.");}
       catch(e){console.error("Support close notification failed:",{ticketId:c.match[1],userId,error:e.description||e.message});}

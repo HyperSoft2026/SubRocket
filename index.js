@@ -184,7 +184,7 @@ bot.action(/^adm:/,async ctx=>{
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
     if(action==="adm:users") return showAdminUsers(ctx);
-    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل /cancel للإلغاء.");}
+    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل إلغاء للإلغاء.");}
     if(action==="adm:settings") return showAdminSettings(ctx);
     if(action==="adm:campaigns") return showAdminCampaigns(ctx);
     if(action==="adm:point_add"||action==="adm:point_sub"||action==="adm:point_check") {
@@ -197,7 +197,7 @@ bot.action(/^adm:/,async ctx=>{
       await setSetting("maintenance_mode",current==="true"?"false":"true");
       return showAdminSettings(ctx);
     }
-    if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل /cancel للإلغاء.");}
+    if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل إلغاء للإلغاء.");}
     const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);
     if(banMatch) {
       const banned=banMatch[1]==="ban", userId=banMatch[2];
@@ -270,7 +270,7 @@ bot.on("text",async ctx=>{
   const state=adminState.get(adminId);
   if(!state) return;
   const input=(ctx.message.text||"").trim();
-  if(input==="/cancel"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
+  if(input==="إلغاء"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
   try {
     if(state.type==="user_manage") {
       if(!/^\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");
@@ -330,7 +330,9 @@ async function main(){
   await initializeDatabase();
   console.log("PostgreSQL connected; SubRocket schema is ready.");
   await bot.launch();
-  console.log("SubRocket v0.0.1 is running with Telegram long polling.");
+  await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"}],{scope:{type:"default"}});
+  await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"},{command:"adminadmin",description:"لوحة تحكم المدير"}],{scope:{type:"chat",chat_id:Number(adminId)}});
+  console.log("SubRocket v0.0.2 is running with button-first menus and scoped commands.");
 }
 main().catch(e=>{console.error("Startup failed:",e);process.exit(1);});
 process.once("SIGINT",()=>bot.stop("SIGINT"));

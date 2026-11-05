@@ -1,8 +1,8 @@
 {
   "name": "subrocket",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "private": true,
-  "description": "بوت تيليجرام لنظام نقاط وتمويل القنوات والكروبات",
+  "description": "بوت تيليجرام عراقي لنظام نقاط وتمويل القنوات والكروبات",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

@@ -96,16 +96,16 @@ async function notifications(ctx,pool) {
 }
 async function handleText(ctx,pool,adminId,bot) {
   const id=String(ctx.from.id),input=(ctx.message.text||"").trim();
-  const state=adminStates.get(id);
+  const adminState=adminStates.get(id);
   if(id===String(adminId)&&adminStates.has(id)){
     if(input==="إلغاء"){adminStates.delete(id);await ctx.reply("تم الإلغاء.");return true;}
-    if(state.type==="support_reply"){
+    if(adminState && typeof adminState==="object" && adminState.type==="support_reply"){
       if(input.length>3000){await ctx.reply("الحد الأقصى 3000 حرف.");return true;}
-      const r=await pool.query("UPDATE support_tickets SET admin_reply=$1,status='answered',updated_at=NOW() WHERE id=$2 RETURNING user_id",[input,state.ticketId]);
+      const r=await pool.query("UPDATE support_tickets SET admin_reply=$1,status='answered',updated_at=NOW() WHERE id=$2 RETURNING user_id",[input,adminState.ticketId]);
       if(!r.rowCount){adminStates.delete(id);await ctx.reply("التذكرة غير موجودة.");return true;}
-      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_reply',$2,$3::jsonb)",[id,state.ticketId,JSON.stringify({reply_length:input.length})]);
-      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"رد على تذكرتك #"+state.ticketId,input]);
-      await bot.telegram.sendMessage(String(r.rows[0].user_id),"🎧 رد فريق الدعم على تذكرتك #"+state.ticketId+":\n\n"+input).catch(()=>{});
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_reply',$2,$3::jsonb)",[id,adminState.ticketId,JSON.stringify({reply_length:input.length})]);
+      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"رد على تذكرتك #"+adminState.ticketId,input]);
+      await bot.telegram.sendMessage(String(r.rows[0].user_id),"🎧 رد فريق الدعم على تذكرتك #"+adminState.ticketId+":\n\n"+input).catch(()=>{});
       adminStates.delete(id);await ctx.reply("تم إرسال الرد للمستخدم.");return true;
     }
     const p=input.split(/\s+/);

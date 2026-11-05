@@ -192,6 +192,8 @@ bot.action(/^claim:(\d+)$/,async ctx=>{
       await recordCampaignEvent(client,id,ctx.from.id,"claim_pending_retention",{claimId:claim.rows[0].id,userId:String(ctx.from.id),verificationHours:retentionHours});
     }else{
       await applyLedgerEntry(client,{userId:ctx.from.id,amount:String(reward),reason:"campaign_reward",referenceId:id,idempotencyKey:"claim:"+claim.rows[0].id+":instant-reward"});
+      await client.query("INSERT INTO user_reputation(user_id,verified_claims) VALUES($1,1) ON CONFLICT(user_id) DO UPDATE SET verified_claims=user_reputation.verified_claims+1,last_calculated_at=NOW()",[String(ctx.from.id)]);
+      await client.query("WITH calc AS (SELECT user_id,GREATEST(0,LEAST(100,verified_claims*2+retained_claims*5-violations*10)) score FROM user_reputation WHERE user_id=$1) UPDATE user_reputation r SET score=calc.score,level=CASE WHEN calc.score>=90 THEN 5 WHEN calc.score>=70 THEN 4 WHEN calc.score>=45 THEN 3 WHEN calc.score>=20 THEN 2 ELSE 1 END FROM calc WHERE r.user_id=calc.user_id",[String(ctx.from.id)]);
       await rewardReferral(client,pool,ctx.from.id);
       await recordCampaignEvent(client,id,ctx.from.id,"claim_verified",{claimId:claim.rows[0].id,userId:String(ctx.from.id)});
     }

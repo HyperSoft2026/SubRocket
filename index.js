@@ -285,7 +285,7 @@ bot.action(/^owner:campaign:(\d+)$/,async ctx=>{
   const action=c.status==="active"?"pause":c.status==="paused"?"resume":null;
   const rows=[];
   if(action)rows.push([Markup.button.callback(action==="pause"?"⏸️ إيقاف مؤقت":"▶️ استئناف","owner:campaign-action:"+action+":"+c.id)]);
-  if(["active","paused","completed"].includes(c.status))rows.push([Markup.button.callback("⛔ إلغاء الحملة واسترداد المتبقي","owner:campaign-cancel:"+c.id)]);
+  if(["active","paused"].includes(c.status)||(c.status==="completed"&&Number(claims.rows[0].pending)>0))rows.push([Markup.button.callback("⛔ إلغاء الحملة واسترداد المتبقي","owner:campaign-cancel:"+c.id)]);
   if(["completed","expired","cancelled"].includes(c.status))rows.push([Markup.button.callback("🔄 تجديد هذه الحملة","owner:campaign-renew:"+c.id)]);
   rows.push([Markup.button.callback("⬅️ حملاتي","owner:campaigns")]);
   await ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالحالة: "+c.status+"\nالتصنيف: "+c.category+"\nالمقاعد: "+c.slots_remaining+"/"+c.slots_total+" متبقية\nالمكافأة: "+c.reward_per_member+" نقطة\nالمطالبات المتحققة: "+claims.rows[0].verified+"\nقيد التحقق: "+claims.rows[0].pending+"\nمرفوضة: "+claims.rows[0].rejected+"\nتاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\nالانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"غير محدد"),Markup.inlineKeyboard(rows));

@@ -1,0 +1,18 @@
+{
+  "name": "subrocket",
+  "version": "1.0.0",
+  "private": true,
+  "description": "بوت تيليجرام لنظام نقاط وتمويل القنوات والكروبات",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "pg": "^8.13.1",
+    "telegraf": "^4.16.3"
+  }
+}

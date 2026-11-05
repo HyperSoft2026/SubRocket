@@ -129,7 +129,7 @@ async function showAdminSettings(ctx) {
 async function showAdminUsers(ctx) {
   const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned FROM users ORDER BY created_at DESC LIMIT 10");
   const lines=r.rows.map((u,i)=>(i+1)+". "+(u.first_name||"مستخدم")+" · "+u.telegram_id+" · ⭐ "+u.points+(u.is_banned?" · محظور":""));
-  await ctx.editMessageText("👥 **آخر 10 مستخدمين**\n\n"+(lines.join("\n")||"لا يوجد مستخدمون بعد.")+"\n\nلإدارة رصيد أو حظر مستخدم استخدم قسم النقاط أو أرسل أيدي المستخدم من خيارات الإدارة.",{parse_mode:"Markdown",...Markup.inlineKeyboard([[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ رجوع","adm:home")]])});
+  await ctx.editMessageText("👥 **آخر 10 مستخدمين**\n\n"+(lines.join("\n")||"لا يوجد مستخدمون بعد.")+"\n\nيمكنك البحث عن مستخدم وإدارة حسابه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([[Markup.button.callback("🔎 البحث عن مستخدم","adm:user_manage")],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ رجوع","adm:home")]])});
 }
 async function showAdminCampaigns(ctx) {
   const r=await pool.query("SELECT id,channel_username,slots_remaining,reward_per_member,status FROM campaigns ORDER BY created_at DESC LIMIT 10");
@@ -228,7 +228,7 @@ bot.action(/^adm:/,async ctx=>{
     if(action==="adm:home") return showAdmin(ctx,true);
     if(action==="adm:stats") return showAdminStats(ctx);
     if(action==="adm:points") return showAdminPoints(ctx);
-    if(action==="adm:users") return showAdminUsers(ctx);
+    if(action==="adm:users") return showAdminUsers(ctx);\n    if(action==="adm:user_manage") {adminState.set(adminId,{type:"user_manage"});return ctx.reply("أرسل أيدي تيليجرام الرقمي للمستخدم الذي تريد إدارته. أرسل /cancel للإلغاء.");}
     if(action==="adm:settings") return showAdminSettings(ctx);
     if(action==="adm:campaigns") return showAdminCampaigns(ctx);
     if(action==="adm:point_add"||action==="adm:point_sub"||action==="adm:point_check") {
@@ -242,7 +242,7 @@ bot.action(/^adm:/,async ctx=>{
       return showAdminSettings(ctx);
     }
     if(action==="adm:broadcast") {adminState.set(adminId,{type:"broadcast"});return ctx.reply("أرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين. أرسل /cancel للإلغاء.");}
-    const match=action.match(/^adm:campaign:(\d+)$/);
+    const banMatch=action.match(/^adm:(ban|unban):(\d+)$/);\n    if(banMatch) {\n      const banned=banMatch[1]==="ban", userId=banMatch[2];\n      if(userId===adminId) return ctx.reply("لا يمكن حظر حساب المدير.");\n      const result=await pool.query("UPDATE users SET is_banned=$1,updated_at=NOW() WHERE telegram_id=$2 RETURNING first_name,points",[banned,userId]);\n      if(!result.rowCount) return ctx.reply("المستخدم غير موجود.");\n      return ctx.reply((banned?"تم إيقاف":"تم تفعيل")+" حساب "+userId+".");\n    }\n    const match=action.match(/^adm:campaign:(\d+)$/);
     if(match) {
       const r=await pool.query("SELECT c.*,u.username,u.first_name FROM campaigns c JOIN users u ON u.telegram_id=c.owner_id WHERE c.id=$1",[Number(match[1])]);
       if(!r.rowCount) return ctx.reply("الحملة غير موجودة.");
@@ -278,7 +278,7 @@ bot.on("text",async ctx=>{
   const input=(ctx.message.text||"").trim();
   if(input==="/cancel"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
   try {
-    if(state.type==="rate") {
+    if(state.type==="user_manage") {\n      if(!/^\\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");\n      const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned,created_at FROM users WHERE telegram_id=$1",[input]);\n      if(!r.rowCount) return ctx.reply("المستخدم غير مسجل في البوت.");\n      const u=r.rows[0];adminState.delete(adminId);\n      const action=u.is_banned?"unban":"ban";\n      return ctx.reply("👤 المستخدم: "+(u.first_name||"—")+"\\nالأيدي: "+u.telegram_id+"\\nالمعرف: "+(u.username?"@"+u.username:"—")+"\\nالرصيد: "+u.points+" نقطة\\nالحالة: "+(u.is_banned?"محظور":"نشط"),Markup.inlineKeyboard([[Markup.button.callback(u.is_banned?"🟢 إلغاء الحظر":"🚫 حظر المستخدم","adm:"+action+":"+u.telegram_id)],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ المستخدمون","adm:users")]]));\n    }\n    if(state.type==="rate") {
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
       await setSetting("points_per_member",input);adminState.delete(adminId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");

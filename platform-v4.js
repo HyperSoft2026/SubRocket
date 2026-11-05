@@ -42,6 +42,7 @@ async function migrateV4(pool, superAdminId) {
         "CREATE TABLE IF NOT EXISTS user_favorites (user_id BIGINT NOT NULL REFERENCES users(telegram_id),campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(user_id,campaign_id))",
         "CREATE TABLE IF NOT EXISTS reward_tasks (id BIGSERIAL PRIMARY KEY,task_key TEXT NOT NULL UNIQUE,title TEXT NOT NULL,description TEXT NOT NULL,period TEXT NOT NULL CHECK(period IN ('daily','weekly','monthly','event')),target_count INTEGER NOT NULL CHECK(target_count>0),reward_points BIGINT NOT NULL CHECK(reward_points>0),active BOOLEAN NOT NULL DEFAULT TRUE,starts_at TIMESTAMPTZ,ends_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
         "CREATE TABLE IF NOT EXISTS user_task_progress (id BIGSERIAL PRIMARY KEY,task_id BIGINT NOT NULL REFERENCES reward_tasks(id),user_id BIGINT NOT NULL REFERENCES users(telegram_id),period_key TEXT NOT NULL,progress INTEGER NOT NULL DEFAULT 0,completed_at TIMESTAMPTZ,rewarded_at TIMESTAMPTZ,UNIQUE(task_id,user_id,period_key))",
+        "CREATE TABLE IF NOT EXISTS daily_login_claims (user_id BIGINT NOT NULL REFERENCES users(telegram_id),login_date DATE NOT NULL,streak_days INTEGER NOT NULL DEFAULT 1,reward_points BIGINT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(user_id,login_date))",
         "CREATE TABLE IF NOT EXISTS staff_members (user_id BIGINT PRIMARY KEY REFERENCES users(telegram_id),role TEXT NOT NULL CHECK(role IN ('admin','moderator','support','analyst')),granted_by BIGINT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
         "CREATE TABLE IF NOT EXISTS moderation_cases (id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(telegram_id),reporter_id BIGINT,reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','reviewing','confirmed','dismissed')),reviewed_by BIGINT,reviewed_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
         "CREATE TABLE IF NOT EXISTS transactional_outbox (id BIGSERIAL PRIMARY KEY,event_type TEXT NOT NULL,payload JSONB NOT NULL,available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,processed_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
@@ -65,7 +66,7 @@ async function migrateV4(pool, superAdminId) {
     if (superAdminId && /^\\d+$/.test(String(superAdminId))) {
       await client.query("INSERT INTO staff_members(user_id,role,granted_by) SELECT telegram_id,'admin',telegram_id FROM users WHERE telegram_id=$1 ON CONFLICT(user_id) DO NOTHING", [String(superAdminId)]);
     }
-    await client.query("INSERT INTO bot_settings(key,value) VALUES ('retention_verification_enabled','false'),('retention_hours','24'),('campaign_review_required','false') ON CONFLICT(key) DO NOTHING");
+    await client.query("INSERT INTO bot_settings(key,value) VALUES ('retention_verification_enabled','false'),('retention_hours','24'),('campaign_review_required','false'),('daily_login_reward','10'),('daily_streak_bonus','25') ON CONFLICT(key) DO NOTHING");
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

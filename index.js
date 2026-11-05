@@ -72,6 +72,7 @@ function adminKeyboard() {
     [Markup.button.callback("👥 المستخدمون","adm:users"),Markup.button.callback("📢 إذاعة رسالة","adm:broadcast")],
     [Markup.button.callback("🚀 الحملات","adm:campaigns"),Markup.button.callback("⚙️ إعدادات البوت","adm:settings")],
     [Markup.button.callback("🎟️ إنشاء كود مكافأة","v3:admin_coupon")],
+    [Markup.button.callback("🎧 تذاكر الدعم","v3:admin_tickets")],
     [Markup.button.callback("🔄 تحديث اللوحة","adm:home")]
   ]);
 }

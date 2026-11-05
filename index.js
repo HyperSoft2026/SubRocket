@@ -95,6 +95,7 @@ function adminKeyboard() {
     [Markup.button.callback("🚀 الحملات","adm:campaigns"),Markup.button.callback("⚙️ إعدادات البوت","adm:settings")],
     [Markup.button.callback("🎟️ إنشاء كود مكافأة","v3:admin_coupon")],
     [Markup.button.callback("🎧 تذاكر الدعم","v3:admin_tickets")],
+    [Markup.button.callback("👑 فريق العمل والصلاحيات","adm:staff")],
     [Markup.button.callback("🔄 تحديث اللوحة","adm:home")]
   ]);
 }

@@ -66,6 +66,7 @@ function mainKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
     [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
+    [Markup.button.callback("📡 قنواتي","owner:channels")],
     [Markup.button.callback("💎 مركز المكافآت","v3:menu")],
     [Markup.button.callback("ℹ️ حول SubRocket","help")]
   ]);
@@ -189,8 +190,40 @@ bot.action("campaigns",async ctx=>{
 bot.action("campaign_help",async ctx=>{
   await ctx.answerCbQuery();
   if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
+  const channels=await pool.query("SELECT id,username,title FROM channel_owners WHERE owner_id=$1 AND verified=TRUE ORDER BY created_at DESC",[String(ctx.from.id)]);
+  if(channels.rowCount){
+    const rows=channels.rows.map(ch=>[Markup.button.callback("📢 "+ch.title+" · "+(ch.username||ch.chat_id),"owner:use:"+ch.id)]);
+    rows.push([Markup.button.callback("➕ إضافة قناة جديدة","owner:add")],[Markup.button.callback("إلغاء","campaign_cancel")]);
+    return ctx.reply("اختر قناة محفوظة لإنشاء الحملة:",Markup.inlineKeyboard(rows));
+  }
   userState.set(String(ctx.from.id),{type:"campaign_channel"});
   await ctx.reply("➕ إنشاء حملة جديدة\nأرسل معرف قناتك العامة مثل @MyChannel. يجب أن تكون مشرفاً بالقناة وأن تضيف البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("إلغاء","campaign_cancel")]]));
+});
+bot.action("owner:channels",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,username,title,verified,created_at FROM channel_owners WHERE owner_id=$1 ORDER BY created_at DESC",[String(ctx.from.id)]);
+  const lines=r.rows.map((ch,i)=>(i+1)+". "+ch.title+" · "+(ch.username?"@"+ch.username:"قناة خاصة")+" · "+(ch.verified?"موثقة":"غير موثقة"));
+  await ctx.reply("📡 قنواتي\n\n"+(lines.join("\n")||"لم تحفظ أي قناة بعد.")+"\n\nيمكنك حفظ القنوات بعد التحقق من ملكيتك وإضافة البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("➕ إضافة قناة","owner:add")],[Markup.button.callback("⬅️ الرئيسية","home")]]));
+});
+bot.action("owner:add",async ctx=>{
+  await ctx.answerCbQuery();
+  userState.set(String(ctx.from.id),{type:"channel_add"});
+  await ctx.reply("أرسل معرف القناة العامة مثل @MyChannel. يجب أن تكون مالكاً أو مشرفاً بالقناة، وأن يكون البوت مشرفاً أيضاً. للإلغاء أرسل إلغاء.");
+});
+bot.action(/^owner:use:(\\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT username,title FROM channel_owners WHERE id=$1 AND owner_id=$2 AND verified=TRUE",[ctx.match[1],String(ctx.from.id)]);
+  if(!r.rowCount)return ctx.reply("القناة غير موجودة أو لم تعد موثقة.");
+  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:r.rows[0].username});
+  await ctx.reply("تم اختيار قناة "+r.rows[0].title+". كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
+});
+bot.action("owner:use-latest",async ctx=>{await ctx.answerCbQuery();});
+bot.action(/^owner:use-latest:(-?\\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,username FROM channel_owners WHERE owner_id=$1 AND chat_id=$2 AND verified=TRUE",[String(ctx.from.id),String(ctx.match[1])]);
+  if(!r.rowCount)return ctx.reply("القناة غير محفوظة.");
+  userState.set(String(ctx.from.id),{type:"campaign_slots",channel:"@"+r.rows[0].username});
+  await ctx.reply("كم عدد الأعضاء المطلوبين؟ أرسل رقماً من 1 إلى 10000.");
 });
 bot.action("campaign_cancel",async ctx=>{userState.delete(String(ctx.from.id));await ctx.answerCbQuery("تم الإلغاء.");return ctx.reply("تم إلغاء العملية.",mainKeyboard());});
 bot.action("home",async ctx=>{await ctx.answerCbQuery();return ctx.reply("القائمة الرئيسية 🚀",mainKeyboard());});
@@ -257,6 +290,19 @@ bot.on("text",async ctx=>{
     if(!state) return;
     const input=(ctx.message.text||"").trim();
     if(input==="إلغاء"){userState.delete(String(ctx.from.id));return ctx.reply("تم إلغاء العملية.",mainKeyboard());}
+    if(state.type==="channel_add"){
+      if(!/^@[A-Za-z0-9_]{5,32}$/.test(input))return ctx.reply("معرف القناة غير صحيح. أرسله بصيغة @ChannelName.");
+      try{
+        const chat=await bot.telegram.getChat(input);
+        if(chat.type!=="channel")return ctx.reply("هذا المعرف لا يعود إلى قناة Telegram.");
+        const me=await bot.telegram.getMe();
+        if(!(await isChannelAdmin(input,me.id)))return ctx.reply("يجب إضافة البوت مشرفاً بالقناة أولاً.");
+        if(!(await isChannelAdmin(input,ctx.from.id)))return ctx.reply("يجب أن تكون مالكاً أو مشرفاً بالقناة حتى تحفظها.");
+        await pool.query("INSERT INTO channel_owners(owner_id,chat_id,username,title,verified,verified_at) VALUES($1,$2,$3,$4,TRUE,NOW()) ON CONFLICT(owner_id,chat_id) DO UPDATE SET username=EXCLUDED.username,title=EXCLUDED.title,verified=TRUE,verified_at=NOW()",[String(ctx.from.id),String(chat.id),chat.username||input.replace(/^@/,""),chat.title||input]);
+        userState.delete(String(ctx.from.id));
+        return ctx.reply("✅ تم حفظ القناة والتحقق من صلاحياتك: "+(chat.title||input),Markup.inlineKeyboard([[Markup.button.callback("➕ إنشاء حملة بهذه القناة","owner:use-latest:"+chat.id)],[Markup.button.callback("📡 قنواتي","owner:channels")]]));
+      }catch(e){console.error("Channel verification failed:",e.description||e.message);return ctx.reply("تعذر التحقق من القناة. تأكد من المعرف وصلاحيات البوت.");}
+    }
     if(state.type==="campaign_channel"){
       if(!/^@[A-Za-z0-9_]{5,32}$/.test(input)) return ctx.reply("معرف القناة غير صحيح. أرسله بصيغة @ChannelName.");
       state.channel=input;state.type="campaign_slots";userState.set(String(ctx.from.id),state);
@@ -270,6 +316,8 @@ bot.on("text",async ctx=>{
         if(chat.type!=="channel") return ctx.reply("المعرف لا يعود إلى قناة عامة.",mainKeyboard());
         const me=await bot.telegram.getMe();
         if(!(await isChannelAdmin(channel,me.id))) return ctx.reply("أضف البوت مشرفاً بالقناة أولاً ثم أعد المحاولة.",mainKeyboard());
+        if(!(await isChannelAdmin(channel,ctx.from.id))) return ctx.reply("يجب أن تكون مالكاً أو مشرفاً بالقناة لإنشاء حملة لها.",mainKeyboard());
+        await pool.query("INSERT INTO channel_owners(owner_id,chat_id,username,title,verified,verified_at) VALUES($1,$2,$3,$4,TRUE,NOW()) ON CONFLICT(owner_id,chat_id) DO UPDATE SET username=EXCLUDED.username,title=EXCLUDED.title,verified=TRUE,verified_at=NOW()",[String(ctx.from.id),String(chat.id),chat.username||channel.replace(/^@/,""),chat.title||channel]);
         const rate=await pointsPerMember(),cost=BigInt(slots)*BigInt(rate);client=await pool.connect();await client.query("BEGIN");
         const campaign=await createCampaign(client,{ownerId:ctx.from.id,channelUsername:channel,channelTitle:chat.title||channel,slots,rewardPerMember:rate});
         await client.query("COMMIT");

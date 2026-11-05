@@ -18,7 +18,10 @@ async function migrateV3(pool) {
     "CREATE TABLE IF NOT EXISTS user_achievements (user_id BIGINT NOT NULL REFERENCES users(telegram_id),achievement_key TEXT NOT NULL,awarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(user_id,achievement_key))",
     "CREATE TABLE IF NOT EXISTS admin_audit_log (id BIGSERIAL PRIMARY KEY,admin_id BIGINT NOT NULL,action TEXT NOT NULL,target_id BIGINT,details JSONB NOT NULL DEFAULT '{}'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     "CREATE TABLE IF NOT EXISTS support_tickets (id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(telegram_id),message TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','answered','closed')),admin_reply TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-    "CREATE INDEX IF NOT EXISTS support_tickets_status_idx ON support_tickets(status,created_at DESC)"
+    "CREATE INDEX IF NOT EXISTS support_tickets_status_idx ON support_tickets(status,created_at DESC)",
+    "CREATE TABLE IF NOT EXISTS support_ticket_messages (id BIGSERIAL PRIMARY KEY,ticket_id BIGINT NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,sender_id BIGINT NOT NULL,sender_role TEXT NOT NULL CHECK(sender_role IN ('user','admin')),body TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    "CREATE INDEX IF NOT EXISTS support_ticket_messages_ticket_idx ON support_ticket_messages(ticket_id,id)",
+    "INSERT INTO support_ticket_messages(ticket_id,sender_id,sender_role,body,created_at) SELECT t.id,t.user_id,'user',t.message,t.created_at FROM support_tickets t WHERE NOT EXISTS (SELECT 1 FROM support_ticket_messages m WHERE m.ticket_id=t.id AND m.sender_role='user' AND m.body=t.message)"
   ];
   for (const q of sql) await pool.query(q);
   await pool.query("INSERT INTO bot_settings(key,value) VALUES ('referral_reward','50') ON CONFLICT(key) DO NOTHING");
@@ -101,12 +104,20 @@ async function handleText(ctx,pool,adminId,bot) {
     if(input==="إلغاء"){adminStates.delete(id);await ctx.reply("تم الإلغاء.");return true;}
     if(adminState && typeof adminState==="object" && adminState.type==="support_reply"){
       if(input.length>3000){await ctx.reply("الحد الأقصى 3000 حرف.");return true;}
-      const r=await pool.query("UPDATE support_tickets SET admin_reply=$1,status='answered',updated_at=NOW() WHERE id=$2 RETURNING user_id",[input,adminState.ticketId]);
+      const r=await pool.query("SELECT user_id,status FROM support_tickets WHERE id=$1",[adminState.ticketId]);
       if(!r.rowCount){adminStates.delete(id);await ctx.reply("التذكرة غير موجودة.");return true;}
-      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_reply',$2,$3::jsonb)",[id,adminState.ticketId,JSON.stringify({reply_length:input.length})]);
-      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"رد على تذكرتك #"+adminState.ticketId,input]);
-      await bot.telegram.sendMessage(String(r.rows[0].user_id),"🎧 رد فريق الدعم على تذكرتك #"+adminState.ticketId+":\n\n"+input).catch(()=>{});
-      adminStates.delete(id);await ctx.reply("تم إرسال الرد للمستخدم.");return true;
+      if(r.rows[0].status==="closed"){adminStates.delete(id);await ctx.reply("هذه التذكرة مغلقة. افتح تذكرة جديدة إذا لزم الأمر.");return true;}
+      const userId=String(r.rows[0].user_id);
+      await pool.query("INSERT INTO support_ticket_messages(ticket_id,sender_id,sender_role,body) VALUES($1,$2,'admin',$3)",[adminState.ticketId,id,input]);
+      await pool.query("UPDATE support_tickets SET admin_reply=$1,updated_at=NOW() WHERE id=$2",[input,adminState.ticketId]);
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_reply',$2,$3::jsonb)",[id,adminState.ticketId,JSON.stringify({reply_length:input.length,user_id:userId})]);
+      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[userId,"رد على تذكرتك #"+adminState.ticketId,input]);
+      let delivered=true,deliveryError="";
+      try{await bot.telegram.sendMessage(userId,"🎧 رد فريق الدعم على تذكرتك #"+adminState.ticketId+":\n\n"+input+"\n\nللرد أرسل رسالتك من زر 🎧 الدعم الفني.");}
+      catch(e){delivered=false;deliveryError=e.description||e.message||"Telegram delivery failed";console.error("Support reply delivery failed:",{ticketId:adminState.ticketId,userId,error:deliveryError});}
+      adminStates.delete(id);
+      await ctx.reply(delivered?"✅ تم حفظ الرد وإرساله للمستخدم.":"⚠️ تم حفظ الرد داخل التذكرة، لكن تيليجرام لم يسلّمه للمستخدم. سيجده عند فتح الدعم الفني.\nالسبب: "+deliveryError);
+      return true;
     }
     const p=input.split(/\s+/);
     if(p.length!==3||!/^[A-Z0-9_-]{4,32}$/i.test(p[0])||!/^\d+$/.test(p[1])||!/^\d+$/.test(p[2])||Number(p[1])<1||Number(p[2])<1||Number(p[2])>100000){await ctx.reply("الصيغة: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50");return true;}
@@ -132,12 +143,29 @@ async function handleText(ctx,pool,adminId,bot) {
     }catch(e){await c.query("ROLLBACK");if(e.code==="23505"){userStates.delete(id);await ctx.reply("سبق واسترددت هذا الكود.");}else throw e;}finally{c.release();}
     return true;
   }
+  if(state && typeof state==="object" && state.type==="support_reply"){
+    if(input.length<1||input.length>3000){await ctx.reply("اكتب رسالة من 1 إلى 3000 حرف.");return true;}
+    const t=await pool.query("SELECT status FROM support_tickets WHERE id=$1 AND user_id=$2",[state.ticketId,id]);
+    if(!t.rowCount||t.rows[0].status==="closed"){userStates.delete(id);await ctx.reply("التذكرة مغلقة أو غير موجودة. افتح طلب دعم جديد.");return true;}
+    await pool.query("INSERT INTO support_ticket_messages(ticket_id,sender_id,sender_role,body) VALUES($1,$2,'user',$3)",[state.ticketId,id,input]);
+    await pool.query("UPDATE support_tickets SET updated_at=NOW() WHERE id=$1",[state.ticketId]);
+    userStates.delete(id);
+    try{await bot.telegram.sendMessage(String(adminId),"📩 رد جديد على التذكرة #"+state.ticketId+"\nالمستخدم: "+id+"\n\n"+input,Markup.inlineKeyboard([[Markup.button.callback("فتح التذكرة","v3:ticket:"+state.ticketId)],[Markup.button.callback("كل التذاكر","v3:admin_tickets")]]));}
+    catch(e){console.error("Support user reply notification failed:",{ticketId:state.ticketId,userId:id,error:e.description||e.message});}
+    await ctx.reply("✅ تم حفظ رسالتك وإضافتها إلى التذكرة #"+state.ticketId+". تبقى مفتوحة إلى أن يغلقها الدعم الفني.");
+    return true;
+  }
   if(state==="support"){
     if(input.length<5||input.length>3000){await ctx.reply("اكتب تفاصيل من 5 إلى 3000 حرف.");return true;}
+    const existing=await pool.query("SELECT id FROM support_tickets WHERE user_id=$1 AND status<>'closed' ORDER BY updated_at DESC LIMIT 1",[id]);
+    if(existing.rowCount){userStates.set(id,{type:"support_reply",ticketId:Number(existing.rows[0].id)});return handleText({from:ctx.from,message:{text:input},reply:ctx.reply.bind(ctx)},pool,adminId,bot);}
     const r=await pool.query("INSERT INTO support_tickets(user_id,message) VALUES($1,$2) RETURNING id",[id,input]);
+    await pool.query("INSERT INTO support_ticket_messages(ticket_id,sender_id,sender_role,body) VALUES($1,$2,'user',$3)",[r.rows[0].id,id,input]);
     userStates.delete(id);
-    await bot.telegram.sendMessage(String(adminId),"🎧 تذكرة دعم جديدة #"+r.rows[0].id+"\nمن المستخدم: "+id+"\n\n"+input,Markup.inlineKeyboard([[Markup.button.callback("فتح التذكرة","v3:ticket:"+r.rows[0].id)],[Markup.button.callback("كل التذاكر","v3:admin_tickets")]])).catch(e=>console.error("Support notification failed:",e.message));
-    await ctx.reply("🎧 استلمنا تذكرتك رقم #"+r.rows[0].id+".");return true;
+    try{await bot.telegram.sendMessage(String(adminId),"🎧 تذكرة دعم جديدة #"+r.rows[0].id+"\nمن المستخدم: "+id+"\n\n"+input,Markup.inlineKeyboard([[Markup.button.callback("فتح التذكرة","v3:ticket:"+r.rows[0].id)],[Markup.button.callback("كل التذاكر","v3:admin_tickets")]]));}
+    catch(e){console.error("Support notification failed:",{ticketId:r.rows[0].id,userId:id,error:e.description||e.message});}
+    await ctx.reply("🎧 استلمنا تذكرتك رقم #"+r.rows[0].id+". يمكنك متابعة المراسلة من زر الدعم الفني، وتبقى مفتوحة حتى يغلقها الدعم.");
+    return true;
   }
   return false;
 }
@@ -155,7 +183,21 @@ function installV3(bot,pool,adminId){
     await c.reply("🤝 رابط دعوتك:\nhttps://t.me/"+username+"?start="+code+"\n\nإجمالي الدعوات: "+r.rows[0].total+"\nالمكافآت المؤهلة: "+r.rows[0].paid+"\nتُمنح المكافأة بعد أول اشتراك حقيقي متحقق للمدعو.",menu());
   });
   bot.action("v3:coupon",async c=>{await c.answerCbQuery();userStates.set(String(c.from.id),"coupon");await c.reply("🎁 أرسل كود المكافأة أو اكتب إلغاء.");});
-  bot.action("v3:support",async c=>{await c.answerCbQuery();userStates.set(String(c.from.id),"support");await c.reply("🎧 اكتب استفسارك أو شكواك (5–3000 حرف). للإلغاء اكتب إلغاء.");});
+  bot.action("v3:support",async c=>{
+    await c.answerCbQuery();
+    const userId=String(c.from.id);
+    const r=await pool.query("SELECT id,status FROM support_tickets WHERE user_id=$1 AND status<>'closed' ORDER BY updated_at DESC LIMIT 1",[userId]);
+    if(r.rowCount){
+      const ticketId=Number(r.rows[0].id);
+      const messages=await pool.query("SELECT sender_role,body,created_at FROM support_ticket_messages WHERE ticket_id=$1 ORDER BY id DESC LIMIT 12",[ticketId]);
+      const lines=messages.rows.reverse().map(m=>(m.sender_role==="admin"?"🛡️ الدعم":"👤 أنت")+": "+m.body);
+      userStates.set(userId,{type:"support_reply",ticketId});
+      await c.reply("🎧 تذكرتك المفتوحة #"+ticketId+"\nالحالة: مفتوحة\n\n"+(lines.join("\n\n")||"لا توجد رسائل بعد.")+"\n\nأرسل رسالتك لمتابعة نفس التذكرة. تبقى مفتوحة حتى يغلقها الدعم الفني. للإلغاء أرسل إلغاء.");
+      return;
+    }
+    userStates.set(userId,"support");
+    await c.reply("🎧 اكتب استفسارك أو شكواك (5–3000 حرف). للإلغاء اكتب إلغاء.");
+  });
 
   bot.action("v3:admin_tickets",async c=>{
     if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
@@ -172,7 +214,9 @@ function installV3(bot,pool,adminId){
     const r=await pool.query("SELECT * FROM support_tickets WHERE id=$1",[c.match[1]]);
     if(!r.rowCount){await c.reply("التذكرة غير موجودة.");return;}
     const t=r.rows[0];
-    await c.reply("🎧 التذكرة #"+t.id+"\nالمستخدم: "+t.user_id+"\nالحالة: "+t.status+"\nالتاريخ: "+new Date(t.created_at).toLocaleString("ar-IQ")+"\n\nالرسالة:\n"+t.message+(t.admin_reply?"\n\nآخر رد:\n"+t.admin_reply:""),Markup.inlineKeyboard([
+    const messages=await pool.query("SELECT sender_id,sender_role,body,created_at FROM support_ticket_messages WHERE ticket_id=$1 ORDER BY id ASC LIMIT 30",[t.id]);
+    const transcript=messages.rows.map(m=>(m.sender_role==="admin"?"🛡️ الدعم":"👤 المستخدم")+" ("+m.sender_id+"):\n"+m.body).join("\n\n");
+    await c.reply("🎧 التذكرة #"+t.id+"\nأيدي المستخدم المحفوظ: "+t.user_id+"\nالحالة: "+t.status+"\nالتاريخ: "+new Date(t.created_at).toLocaleString("ar-IQ")+"\n\nسجل المحادثة:\n"+(transcript||t.message)+(t.admin_reply&&!transcript?"\n\nآخر رد:\n"+t.admin_reply:""),Markup.inlineKeyboard([
       [Markup.button.callback("✉️ الرد على التذكرة","v3:ticket_reply:"+t.id)],
       [Markup.button.callback("🔒 إغلاق التذكرة","v3:ticket_close:"+t.id)],
       [Markup.button.callback("⬅️ قائمة التذاكر","v3:admin_tickets")]
@@ -180,15 +224,24 @@ function installV3(bot,pool,adminId){
   });
   bot.action(/^v3:ticket_reply:(\d+)$/,async c=>{
     if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
-    await c.answerCbQuery();adminStates.set(String(adminId),{type:"support_reply",ticketId:Number(c.match[1])});
-    await c.reply("أرسل ردك على التذكرة #"+c.match[1]+". للإلغاء أرسل إلغاء.");
+    await c.answerCbQuery();
+    const ticket=await pool.query("SELECT status FROM support_tickets WHERE id=$1",[c.match[1]]);
+    if(!ticket.rowCount||ticket.rows[0].status==="closed"){await c.reply("هذه التذكرة مغلقة أو غير موجودة.");return;}
+    adminStates.set(String(adminId),{type:"support_reply",ticketId:Number(c.match[1])});
+    await c.reply("أرسل ردك على التذكرة #"+c.match[1]+". سيُحفظ الرد ضمن المحادثة وتبقى التذكرة مفتوحة حتى تغلقها يدوياً. للإلغاء أرسل إلغاء.");
   });
   bot.action(/^v3:ticket_close:(\d+)$/,async c=>{
     if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}
     await c.answerCbQuery();
-    const r=await pool.query("UPDATE support_tickets SET status='closed',updated_at=NOW() WHERE id=$1 RETURNING user_id",[c.match[1]]);
-    if(r.rowCount){await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id) VALUES($1,'support_close',$2)",[adminId,Number(c.match[1])]);await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[String(r.rows[0].user_id),"تم إغلاق تذكرتك #"+c.match[1],"تم إغلاق طلب الدعم الخاص بك."]);}
-    await c.reply(r.rowCount?"🔒 تم إغلاق التذكرة.":"التذكرة غير موجودة.");
+    const r=await pool.query("UPDATE support_tickets SET status='closed',updated_at=NOW() WHERE id=$1 AND status<>'closed' RETURNING user_id",[c.match[1]]);
+    if(r.rowCount){
+      const userId=String(r.rows[0].user_id);
+      await pool.query("INSERT INTO admin_audit_log(admin_id,action,target_id,details) VALUES($1,'support_close',$2,$3::jsonb)",[adminId,Number(c.match[1]),JSON.stringify({user_id:userId})]);
+      await pool.query("INSERT INTO notifications(user_id,type,title,body) VALUES($1,'support',$2,$3)",[userId,"تم إغلاق تذكرتك #"+c.match[1],"تم إغلاق طلب الدعم الخاص بك من فريق الدعم الفني."]);
+      try{await bot.telegram.sendMessage(userId,"🔒 تم إغلاق تذكرة الدعم #"+c.match[1]+". إذا احتجت مساعدة جديدة يمكنك فتح تذكرة أخرى.");}
+      catch(e){console.error("Support close notification failed:",{ticketId:c.match[1],userId,error:e.description||e.message});}
+    }
+    await c.reply(r.rowCount?"🔒 تم إغلاق التذكرة وإشعار المستخدم.":"التذكرة غير موجودة أو مغلقة مسبقاً.");
   });
 
   bot.action("v3:admin_coupon",async c=>{if(String(c.from.id)!==String(adminId)){await c.answerCbQuery().catch(()=>{});return;}await c.answerCbQuery();adminStates.set(String(adminId),"coupon");await c.reply("أرسل: CODE POINTS MAX_USES\nمثال: ROCKET100 100 50\nللإلغاء: إلغاء");});

@@ -89,7 +89,7 @@ async function hasPermission(pool, userId, permission, superAdminId) {
 }
 
 async function grantStaffRole(pool, actorId, targetId, role, superAdminId) {
-  if (!ROLE_PERMISSIONS[role] || role === "admin") throw new Error("Invalid staff role");
+  if (!ROLE_PERMISSIONS[role]) throw new Error("Invalid staff role");
   if (String(actorId) !== String(superAdminId)) throw new Error("Only the super admin can grant staff roles");
   await pool.query(
     "INSERT INTO staff_members(user_id,role,granted_by) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET role=EXCLUDED.role,granted_by=EXCLUDED.granted_by,created_at=NOW()",

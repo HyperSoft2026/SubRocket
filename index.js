@@ -66,7 +66,7 @@ function mainKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⭐ رصيدي","my_points"),Markup.button.callback("🚀 الحملات المتاحة","campaigns")],
     [Markup.button.callback("➕ إنشاء حملة","campaign_help")],
-    [Markup.button.callback("📡 قنواتي","owner:channels")],
+    [Markup.button.callback("📡 قنواتي","owner:channels"),Markup.button.callback("🔖 المفضلة","my:favorites")],
     [Markup.button.callback("💎 مركز المكافآت","v3:menu")],
     [Markup.button.callback("ℹ️ حول SubRocket","help")]
   ]);
@@ -180,12 +180,40 @@ bot.action("my_points",async ctx=>{await registerUser(ctx);const r=await pool.qu
 bot.action("campaigns",async ctx=>{
   await ctx.answerCbQuery();
   if((await setting("maintenance_mode","false"))==="true"&&!isAdmin(ctx)) return ctx.reply("الخدمة متوقفة مؤقتاً للصيانة.");
-  const r=await pool.query("SELECT id,channel_username,slots_remaining,reward_per_member FROM campaigns WHERE status='active' AND slots_remaining>0 ORDER BY created_at DESC LIMIT 12");
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,category,description FROM campaigns WHERE status='active' AND slots_remaining>0 AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY created_at DESC LIMIT 12");
   if(!r.rows.length) return ctx.reply("لا توجد حملات متاحة حالياً.",Markup.inlineKeyboard([[Markup.button.callback("⬅️ القائمة الرئيسية","home")]]));
   const rows=[];
-  for(const x of r.rows){ rows.push([Markup.button.url("📢 "+x.channel_username,"https://t.me/"+x.channel_username.replace(/^@/,""))]); rows.push([Markup.button.callback("تحقق واستلم +"+x.reward_per_member+" ⭐","claim:"+x.id)]); }
+  for(const x of r.rows){
+    rows.push([Markup.button.callback("📋 "+x.channel_username+" · "+x.category+" · "+x.slots_remaining+" مقعد","campaign:detail:"+x.id)]);
+    rows.push([Markup.button.url("📢 فتح القناة","https://t.me/"+x.channel_username.replace(/^@/,"")),Markup.button.callback("⭐ +"+x.reward_per_member,"claim:"+x.id)]);
+  }
   rows.push([Markup.button.callback("⬅️ القائمة الرئيسية","home")]);
-  return ctx.reply("🚀 الحملات المتاحة\nانضم للقناة باختيارك ثم اضغط تحقق واستلم.",Markup.inlineKeyboard(rows));
+  return ctx.reply("🚀 الحملات المتاحة\nاختر حملة لعرض تفاصيلها، ثم انضم للقناة واطلب التحقق.",Markup.inlineKeyboard(rows));
+});
+bot.action(/^campaign:detail:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT c.*,u.first_name,u.username FROM campaigns c JOIN users u ON u.telegram_id=c.owner_id WHERE c.id=$1",[ctx.match[1]]);
+  if(!r.rowCount)return ctx.reply("الحملة غير موجودة.");
+  const c=r.rows[0],remaining=Number(c.slots_remaining),completed=Number(c.slots_total)-remaining;
+  const fav=await pool.query("SELECT 1 FROM user_favorites WHERE user_id=$1 AND campaign_id=$2",[String(ctx.from.id),c.id]);
+  const owner=c.first_name||c.username||String(c.owner_id);
+  const text="🚀 تفاصيل الحملة #"+c.id+"\n\n📢 القناة: "+c.channel_username+"\n👤 صاحب الحملة: "+owner+"\n🏷️ التصنيف: "+c.category+"\n📝 الوصف: "+(c.description||"لا يوجد وصف إضافي.")+"\n\n🎯 المقاعد المطلوبة: "+c.slots_total+"\n✅ المطالبات المسجلة: "+completed+"\n🪑 المقاعد المتبقية: "+remaining+"\n💎 مكافأة الاشتراك: "+c.reward_per_member+" نقطة\n📅 تاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\n⏳ الانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"بدون موعد انتهاء")+"\n📌 الحالة: "+c.status;
+  const rows=[[Markup.button.url("📢 فتح القناة","https://t.me/"+c.channel_username.replace(/^@/,""))],[Markup.button.callback("تحقق واستلم +"+c.reward_per_member+" ⭐","claim:"+c.id)],[Markup.button.callback(fav.rowCount?"🔖 إزالة من المفضلة":"🔖 حفظ بالمفضلة","campaign:favorite:"+c.id)],[Markup.button.callback("⬅️ الحملات","campaigns")]];
+  await ctx.reply(text,Markup.inlineKeyboard(rows));
+});
+bot.action(/^campaign:favorite:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const id=String(ctx.from.id),campaignId=Number(ctx.match[1]);
+  const removed=await pool.query("DELETE FROM user_favorites WHERE user_id=$1 AND campaign_id=$2 RETURNING campaign_id",[id,campaignId]);
+  if(!removed.rowCount)await pool.query("INSERT INTO user_favorites(user_id,campaign_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[id,campaignId]);
+  await ctx.reply(removed.rowCount?"تمت إزالة الحملة من المفضلة.":"تم حفظ الحملة في المفضلة. يمكنك الرجوع إليها من القائمة الرئيسية.");
+});
+bot.action("my:favorites",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT c.id,c.channel_username,c.reward_per_member,c.slots_remaining,c.category FROM user_favorites f JOIN campaigns c ON c.id=f.campaign_id WHERE f.user_id=$1 ORDER BY f.created_at DESC LIMIT 20",[String(ctx.from.id)]);
+  const rows=r.rows.map(c=>[Markup.button.callback("🔖 "+c.channel_username+" · "+c.category+" · +"+c.reward_per_member,"campaign:detail:"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ الرئيسية","home")]);
+  await ctx.reply("🔖 حملاتي المفضلة\n"+(r.rowCount?"اختر حملة لعرض تفاصيلها.":"لا توجد حملات محفوظة حالياً."),Markup.inlineKeyboard(rows));
 });
 bot.action("campaign_help",async ctx=>{
   await ctx.answerCbQuery();

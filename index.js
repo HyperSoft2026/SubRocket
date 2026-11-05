@@ -278,7 +278,14 @@ bot.on("text",async ctx=>{
   const input=(ctx.message.text||"").trim();
   if(input==="/cancel"){adminState.delete(adminId);return ctx.reply("تم إلغاء العملية.");}
   try {
-    if(state.type==="user_manage") {\n      if(!/^\\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");\n      const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned,created_at FROM users WHERE telegram_id=$1",[input]);\n      if(!r.rowCount) return ctx.reply("المستخدم غير مسجل في البوت.");\n      const u=r.rows[0];adminState.delete(adminId);\n      const action=u.is_banned?"unban":"ban";\n      return ctx.reply("👤 المستخدم: "+(u.first_name||"—")+"\\nالأيدي: "+u.telegram_id+"\\nالمعرف: "+(u.username?"@"+u.username:"—")+"\\nالرصيد: "+u.points+" نقطة\\nالحالة: "+(u.is_banned?"محظور":"نشط"),Markup.inlineKeyboard([[Markup.button.callback(u.is_banned?"🟢 إلغاء الحظر":"🚫 حظر المستخدم","adm:"+action+":"+u.telegram_id)],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ المستخدمون","adm:users")]]));\n    }\n    if(state.type==="rate") {
+    if(state.type==="user_manage") {
+      if(!/^\d+$/.test(input)) return ctx.reply("أرسل أيدي تيليجرام رقمي صحيح.");
+      const r=await pool.query("SELECT telegram_id,username,first_name,points,is_banned,created_at FROM users WHERE telegram_id=$1",[input]);
+      if(!r.rowCount) return ctx.reply("المستخدم غير مسجل في البوت.");
+      const u=r.rows[0];adminState.delete(adminId);
+      const action=u.is_banned?"unban":"ban";
+      return ctx.reply("👤 المستخدم: "+(u.first_name||"—")+"\nالأيدي: "+u.telegram_id+"\nالمعرف: "+(u.username?"@"+u.username:"—")+"\nالرصيد: "+u.points+" نقطة\nالحالة: "+(u.is_banned?"محظور":"نشط"),Markup.inlineKeyboard([[Markup.button.callback(u.is_banned?"🟢 إلغاء الحظر":"🚫 حظر المستخدم","adm:"+action+":"+u.telegram_id)],[Markup.button.callback("⭐ إدارة النقاط","adm:points")],[Markup.button.callback("⬅️ المستخدمون","adm:users")]]));
+    }\n    if(state.type==="rate") {
       if(!/^\d+$/.test(input)||!Number.isSafeInteger(Number(input))||Number(input)<1||Number(input)>1000000) return ctx.reply("أرسل رقماً صحيحاً بين 1 و1,000,000.");
       await setSetting("points_per_member",input);adminState.delete(adminId);
       return ctx.reply("تم تحديث تكلفة العضو إلى "+input+" نقطة. التغيير يطبق على الحملات الجديدة.");

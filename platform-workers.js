@@ -135,6 +135,7 @@ async function processOutbox(pool, bot, limit = 25) {
       if (row.event_type === "campaign.expired") message = "⏳ انتهت الحملة #" + payload.campaignId + " وتم إرجاع " + payload.refund + " نقطة غير مستخدمة إلى رصيدك.";
       if (row.event_type === "campaign.cancelled") message = "⛔ أُلغيت الحملة #" + payload.campaignId + " وتم إرجاع " + payload.refund + " نقطة غير مستخدمة إلى رصيدك.";
       if (row.event_type === "campaign.created") message = "🚀 تم إنشاء حملتك #" + payload.campaignId + " بنجاح.";
+      if (row.event_type === "campaign.approved") message = "✅ تمت الموافقة على حملتك #" + payload.campaignId + " وأصبحت متاحة للمستخدمين.";
       if (message && userId) await bot.telegram.sendMessage(String(userId), message);
       await client.query("UPDATE transactional_outbox SET processed_at=NOW(),last_error=NULL WHERE id=$1", [row.id]);
       await client.query("COMMIT");

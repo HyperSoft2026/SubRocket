@@ -94,7 +94,11 @@ async function expireCampaigns(pool, limit = 25) {
         await client.query("ROLLBACK");
         continue;
       }
-      const c = r.rows[0], refund = BigInt(c.slots_remaining) * BigInt(c.reward_per_member);
+      const c = r.rows[0];
+      const pending = await client.query("SELECT COUNT(*)::int count FROM campaign_claims WHERE campaign_id=$1 AND verification_status='pending'",[c.id]);
+      const refundableSlots=BigInt(c.slots_remaining)+BigInt(pending.rows[0].count);
+      const refund = refundableSlots * BigInt(c.reward_per_member);
+      await client.query("UPDATE campaign_claims SET verification_status='rejected',reward_paid=FALSE WHERE campaign_id=$1 AND verification_status='pending'",[c.id]);
       if (refund > 0n) {
         await applyLedgerEntry(client, { userId: c.owner_id, amount: refund.toString(), reason: "campaign_expiry_refund", referenceId: c.id, idempotencyKey: "campaign:" + c.id + ":expiry-refund" });
       }
@@ -120,7 +124,7 @@ async function processOutbox(pool, bot, limit = 25) {
     let row;
     try {
       await client.query("BEGIN");
-      const r = await client.query("SELECT * FROM transactional_outbox WHERE processed_at IS NULL AND available_at<=NOW() ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1");
+      const r = await client.query("SELECT * FROM transactional_outbox WHERE processed_at IS NULL AND available_at<=NOW() ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED");
       if (!r.rowCount) { await client.query("COMMIT"); break; }
       row = r.rows[0];
       const payload = row.payload || {};

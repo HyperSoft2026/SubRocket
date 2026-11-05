@@ -2,6 +2,7 @@ require("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
 const { Pool } = require("pg");
 const { migrateV3, installV3, applyReferralOnStart, rewardReferral } = require("./features-v3");
+const { migrateV4 } = require("./platform-v4");
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const adminId = String(process.env.TELEGRAM_ADMIN_ID || "");
@@ -336,12 +337,13 @@ bot.catch(e=>console.error("Telegram update error:",e));
 async function main(){
   await initializeDatabase();
   await migrateV3(pool);
+  await migrateV4(pool,adminId);
   installV3(bot,pool,adminId);
   console.log("PostgreSQL connected; SubRocket schema is ready.");
   await bot.launch();
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"}],{scope:{type:"default"}});
   await bot.telegram.setMyCommands([{command:"start",description:"بدء استخدام SubRocket"},{command:"help",description:"المساعدة"},{command:"adminadmin",description:"لوحة تحكم المدير"}],{scope:{type:"chat",chat_id:Number(adminId)}});
-  console.log("SubRocket v0.0.2 is running with button-first menus and scoped commands.");
+  console.log("SubRocket v0.0.4 platform foundation is running; legacy data preserved.");
 }
 main().catch(e=>{console.error("Startup failed:",e);process.exit(1);});
 process.once("SIGINT",()=>bot.stop("SIGINT"));

@@ -233,9 +233,51 @@ bot.action("campaign_help",async ctx=>{
 });
 bot.action("owner:channels",async ctx=>{
   await ctx.answerCbQuery();
-  const r=await pool.query("SELECT id,username,title,verified,created_at FROM channel_owners WHERE owner_id=$1 ORDER BY created_at DESC",[String(ctx.from.id)]);
-  const lines=r.rows.map((ch,i)=>(i+1)+". "+ch.title+" · "+(ch.username?"@"+ch.username:"قناة خاصة")+" · "+(ch.verified?"موثقة":"غير موثقة"));
-  await ctx.reply("📡 قنواتي\n\n"+(lines.join("\n")||"لم تحفظ أي قناة بعد.")+"\n\nيمكنك حفظ القنوات بعد التحقق من ملكيتك وإضافة البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("➕ إضافة قناة","owner:add")],[Markup.button.callback("⬅️ الرئيسية","home")]]));
+  const r=await pool.query(`
+    SELECT ch.id,ch.username,ch.title,ch.verified,
+      COUNT(DISTINCT c.id)::int campaigns,
+      COUNT(DISTINCT c.id) FILTER(WHERE c.status='active')::int active_campaigns,
+      COALESCE(SUM((SELECT COUNT(*) FROM campaign_claims cl WHERE cl.campaign_id=c.id AND cl.verification_status='verified')),0)::int verified_members,
+      COALESCE(SUM((SELECT COALESCE(SUM(cl.reward),0) FROM campaign_claims cl WHERE cl.campaign_id=c.id AND cl.reward_paid=TRUE)),0)::text rewards_paid
+    FROM channel_owners ch
+    LEFT JOIN campaigns c ON c.owner_id=ch.owner_id AND REPLACE(c.channel_username,'@','')=ch.username
+    WHERE ch.owner_id=$1
+    GROUP BY ch.id ORDER BY ch.created_at DESC
+  `,[String(ctx.from.id)]);
+  const lines=r.rows.map((ch,i)=>(i+1)+". "+ch.title+" · "+(ch.username?"@"+ch.username:"قناة خاصة")+" · "+(ch.verified?"موثقة":"غير موثقة")+"\n   الحملات: "+ch.campaigns+" (نشطة: "+ch.active_campaigns+") · اشتراكات متحققة: "+ch.verified_members+" · مكافآت مصروفة: "+ch.rewards_paid);
+  await ctx.reply("📡 قنواتي وإحصائياتها\n\n"+(lines.join("\n\n")||"لم تحفظ أي قناة بعد.")+"\n\nيمكنك حفظ القنوات بعد التحقق من ملكيتك وإضافة البوت مشرفاً.",Markup.inlineKeyboard([[Markup.button.callback("➕ إضافة قناة","owner:add")],[Markup.button.callback("🚀 حملاتي","owner:campaigns")],[Markup.button.callback("⬅️ الرئيسية","home")]]));
+});
+bot.action("owner:campaigns",async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,status,expires_at FROM campaigns WHERE owner_id=$1 ORDER BY created_at DESC LIMIT 20",[String(ctx.from.id)]);
+  const rows=r.rows.map(c=>[Markup.button.callback("#"+c.id+" · "+c.channel_username+" · "+c.status+" · "+c.slots_remaining+"/"+c.slots_total,"owner:campaign:"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ قنواتي","owner:channels")]);
+  await ctx.reply("🚀 حملاتي\nاختر حملة لعرض أدائها وإيقافها أو استئنافها.",Markup.inlineKeyboard(rows));
+});
+bot.action(/^owner:campaign:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const r=await pool.query("SELECT id,channel_username,slots_total,slots_remaining,reward_per_member,status,category,created_at,expires_at FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[1],String(ctx.from.id)]);
+  if(!r.rowCount)return ctx.reply("الحملة غير موجودة أو لا تملك صلاحية إدارتها.");
+  const c=r.rows[0],claims=await pool.query("SELECT COUNT(*) FILTER(WHERE verification_status='verified')::int verified,COUNT(*) FILTER(WHERE verification_status='pending')::int pending,COUNT(*) FILTER(WHERE verification_status='rejected')::int rejected FROM campaign_claims WHERE campaign_id=$1",[c.id]);
+  const action=c.status==="active"?"pause":c.status==="paused"?"resume":null;
+  const rows=[];
+  if(action)rows.push([Markup.button.callback(action==="pause"?"⏸️ إيقاف مؤقت":"▶️ استئناف","owner:campaign-action:"+action+":"+c.id)]);
+  rows.push([Markup.button.callback("⬅️ حملاتي","owner:campaigns")]);
+  await ctx.reply("🚀 الحملة #"+c.id+"\nالقناة: "+c.channel_username+"\nالحالة: "+c.status+"\nالتصنيف: "+c.category+"\nالمقاعد: "+c.slots_remaining+"/"+c.slots_total+" متبقية\nالمكافأة: "+c.reward_per_member+" نقطة\nالمطالبات المتحققة: "+claims.rows[0].verified+"\nقيد التحقق: "+claims.rows[0].pending+"\nمرفوضة: "+claims.rows[0].rejected+"\nتاريخ الإنشاء: "+new Date(c.created_at).toLocaleString("ar-IQ")+"\nالانتهاء: "+(c.expires_at?new Date(c.expires_at).toLocaleString("ar-IQ"):"غير محدد"),Markup.inlineKeyboard(rows));
+});
+bot.action(/^owner:campaign-action:(pause|resume):(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  const client=await pool.connect();
+  try{
+    await client.query("BEGIN");
+    const owned=await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_id=$2",[ctx.match[2],String(ctx.from.id)]);
+    if(!owned.rowCount){await client.query("ROLLBACK");return ctx.reply("الحملة غير موجودة أو لا تملكها.");}
+    const result=await changeCampaignStatus(client,Number(ctx.match[2]),ctx.from.id,ctx.match[1]);
+    if(!result.changed){await client.query("ROLLBACK");return ctx.reply("لا يمكن تغيير حالة الحملة حالياً.");}
+    await client.query("COMMIT");
+    await ctx.reply(ctx.match[1]==="pause"?"⏸️ تم إيقاف الحملة مؤقتاً.":"▶️ تم استئناف الحملة.");
+  }catch(e){await client.query("ROLLBACK").catch(()=>{});console.error("Owner campaign transition failed:",e.message);await ctx.reply("تعذر تحديث الحملة.");}
+  finally{client.release();}
 });
 bot.action("owner:add",async ctx=>{
   await ctx.answerCbQuery();

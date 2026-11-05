@@ -127,10 +127,12 @@ async function showAdminSettings(ctx) {
   const maintenance=await setting("maintenance_mode","false");
   const retention=await setting("retention_verification_enabled","false");
   const retentionHours=await setting("retention_hours","24");
-  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n🛡️ التحقق من الاحتفاظ: "+(retention==="true"?"مفعّل":"متوقف")+"\n⏳ مدة التحقق: "+retentionHours+" ساعة\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
+  const reviewRequired=await setting("campaign_review_required","false");
+  await ctx.editMessageText("⚙️ **إعدادات البوت**\n\n💠 تكلفة تمويل العضو: "+rate+" نقطة\n🛠️ وضع الصيانة: "+(maintenance==="true"?"مفعّل":"متوقف")+"\n🛡️ التحقق من الاحتفاظ: "+(retention==="true"?"مفعّل":"متوقف")+"\n⏳ مدة التحقق: "+retentionHours+" ساعة\n🔍 مراجعة الحملات: "+(reviewRequired==="true"?"مفعّلة":"متوقفة")+"\n\nيمكنك تغيير القيم من الأزرار أدناه.",{parse_mode:"Markdown",...Markup.inlineKeyboard([
     [Markup.button.callback("✏️ تغيير تكلفة العضو","adm:rate")],
     [Markup.button.callback(retention==="true"?"⛔ إيقاف التحقق المؤجل":"🛡️ تفعيل التحقق المؤجل","adm:retention")],
     [Markup.button.callback("⏳ تغيير مدة التحقق","adm:retention_hours")],
+    [Markup.button.callback(reviewRequired==="true"?"⛔ إيقاف مراجعة الحملات":"🔍 تفعيل مراجعة الحملات","adm:campaign_review")],
     [Markup.button.callback(maintenance==="true"?"🟢 إيقاف الصيانة":"🔴 تفعيل الصيانة","adm:maintenance")],
     [Markup.button.callback("⬅️ رجوع","adm:home")]
   ])});
@@ -350,6 +352,11 @@ bot.action(/^adm:/,async ctx=>{
       return ctx.reply("أرسل أيدي المستخدم الرقمي"+(action==="adm:point_check"?" لعرض رصيده.":" ثم المبلغ بالنقاط، مثال: 123456789 500."));
     }
     if(action==="adm:rate") {adminState.set(adminId,{type:"rate"});return ctx.reply("أرسل تكلفة تمويل العضو الواحد بالنقاط (رقم صحيح أكبر من صفر).");}
+    if(action==="adm:campaign_review") {
+      const current=await setting("campaign_review_required","false");
+      await setSetting("campaign_review_required",current==="true"?"false":"true");
+      return showAdminSettings(ctx);
+    }
     if(action==="adm:retention") {
       const current=await setting("retention_verification_enabled","false");
       await setSetting("retention_verification_enabled",current==="true"?"false":"true");

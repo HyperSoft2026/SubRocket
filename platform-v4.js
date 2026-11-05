@@ -63,7 +63,7 @@ async function migrateV4(pool, superAdminId) {
       await client.query("ALTER TABLE campaign_claims ADD CONSTRAINT campaign_claims_verification_status_check CHECK(verification_status IN ('pending','verified','rejected'))");
       await client.query("INSERT INTO schema_migrations(version,name) VALUES($1,$2)", [MIGRATION_VERSION, "evolution-platform-foundation"]);
     }
-    if (superAdminId && /^\\d+$/.test(String(superAdminId))) {
+    if (superAdminId && /^\d+$/.test(String(superAdminId))) {
       await client.query("INSERT INTO staff_members(user_id,role,granted_by) SELECT telegram_id,'admin',telegram_id FROM users WHERE telegram_id=$1 ON CONFLICT(user_id) DO NOTHING", [String(superAdminId)]);
     }
     await client.query("INSERT INTO bot_settings(key,value) VALUES ('retention_verification_enabled','false'),('retention_hours','24'),('campaign_review_required','false'),('daily_login_reward','10'),('daily_streak_bonus','25') ON CONFLICT(key) DO NOTHING");
@@ -100,7 +100,7 @@ async function grantStaffRole(pool, actorId, targetId, role, superAdminId) {
 
 async function applyLedgerEntry(client, entry) {
   const { userId, amount, reason, referenceId = null, idempotencyKey } = entry;
-  if (!/^-?\\d+$/.test(String(amount)) || BigInt(amount) === 0n) throw new Error("Ledger amount must be a non-zero integer");
+  if (!/^-?\d+$/.test(String(amount)) || BigInt(amount) === 0n) throw new Error("Ledger amount must be a non-zero integer");
   if (!idempotencyKey || String(idempotencyKey).length > 180) throw new Error("A stable idempotencyKey is required");
   const inserted = await client.query(
     "INSERT INTO points_ledger(user_id,amount,reason,reference_id,idempotency_key) VALUES($1,$2,$3,$4,$5) ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id",

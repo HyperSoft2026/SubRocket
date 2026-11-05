@@ -77,7 +77,7 @@ async function migrateV4(pool, superAdminId) {
 }
 
 const ROLE_PERMISSIONS = Object.freeze({
-  admin: ["users.read","users.manage","campaigns.read","campaigns.manage","channels.read","channels.manage","wallet.read","wallet.adjust","rewards.manage","support.read","support.reply","moderation.manage","broadcast.send","analytics.read","staff.manage","settings.manage","audit.read"],
+  admin: ["users.read","users.manage","campaigns.read","campaigns.manage","channels.read","channels.manage","wallet.read","wallet.adjust","rewards.manage","support.read","support.reply","moderation.manage","broadcast.send","analytics.read","settings.manage","audit.read"],
   moderator: ["users.read","campaigns.read","campaigns.manage","channels.read","moderation.manage","audit.read"],
   support: ["support.read","support.reply","users.read"],
   analyst: ["analytics.read","users.read","campaigns.read","channels.read","wallet.read","audit.read"]

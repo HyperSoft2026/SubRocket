@@ -58,7 +58,7 @@ async function requireAdmin(ctx) {
   else if(action==="adm:campaigns"||/^adm:campaign:\d+$/.test(action))permission="campaigns.read";
   else if(/^adm:(cancel_campaign|campaign_pause|campaign_resume|approve_campaign|reject_campaign):/.test(action))permission="campaigns.manage";
   else if(action==="adm:stats")permission="analytics.read";
-  else if(action==="adm:settings"||action==="adm:rate"||action==="adm:maintenance"||action==="adm:retention"||action==="adm:retention_hours")permission="settings.manage";
+  else if(action==="adm:settings"||action==="adm:rate"||action==="adm:maintenance"||action==="adm:retention"||action==="adm:retention_hours"||action==="adm:campaign_review")permission="settings.manage";
   else if(action==="adm:broadcast")permission="broadcast.send";
   else if(action==="adm:staff")permission="staff.manage";
   else if(action==="adm:home")permission="users.read";
